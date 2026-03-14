@@ -101,6 +101,14 @@ struct DrawRect
     int thickness;
 };
 
+struct DrawTextAnnotation
+{
+    POINT pos;
+    WCHAR text[256];
+    COLORREF color;
+    int fontSize;
+};
+
 // Annotation color palette
 static const COLORREF g_colorPalette[] =
 {
@@ -127,9 +135,10 @@ POINT g_lastMousePos = {};
 
 std::vector<DrawLine> g_lines;
 std::vector<DrawRect> g_rects;
+std::vector<DrawTextAnnotation> g_texts;
 
 // Undo history — tracks each drawing action in order
-enum ActionType { ACTION_FREEHAND, ACTION_RECT };
+enum ActionType { ACTION_FREEHAND, ACTION_RECT, ACTION_TEXT };
 struct UndoEntry
 {
     ActionType type;
@@ -145,6 +154,7 @@ struct RedoEntry
     UndoEntry undoInfo;
     std::vector<DrawLine> lines;   // stored lines (for ACTION_FREEHAND)
     std::vector<DrawRect> rects;   // stored rects (for ACTION_RECT)
+    std::vector<DrawTextAnnotation> texts; // stored texts (for ACTION_TEXT)
 };
 std::vector<RedoEntry> g_redoHistory;
 
@@ -156,10 +166,21 @@ bool g_isDrawingRect = false;
 POINT g_rectStartPt = {};
 RECT g_currentRect = {};
 
+// Text annotation state
+bool g_isAnnotatingText = false;
+POINT g_textAnnotStartPt = {};
+WCHAR g_currentText[256] = L"";
+
 // Left mouse crop state
 bool g_isCropping = false;
 POINT g_cropStart = {};
 RECT g_cropRect = {};
+
+// Text typing state
+bool g_isTypingText = false;
+POINT g_textPos = {};
+WCHAR g_textBuffer[256] = {};
+int g_textLen = 0;
 
 // Forward declarations
 ATOM                MyRegisterClass(HINSTANCE hInstance);
@@ -183,6 +204,7 @@ void                ShowSettingsDialog(HWND hParent);
 void                ShowToast(const WCHAR* filePath);
 void                DismissToast();
 void                PlayNotificationSound();
+void                CommitTextBlock(HWND hWnd);
 
 // ============================================================================
 // Settings: load from registry (with defaults)
@@ -837,11 +859,15 @@ void ShowOverlay()
     // Clear previous annotations
     g_lines.clear();
     g_rects.clear();
+    g_texts.clear();
     g_undoHistory.clear();
     g_redoHistory.clear();
     g_isDrawingFreehand = false;
     g_isDrawingRect = false;
     g_isCropping = false;
+    g_isTypingText = false;
+    g_textLen = 0;
+    g_textBuffer[0] = L'\0';
     g_currentRect = {};
     g_cropRect = {};
     g_currentColorIndex = 0;  // reset to Red
@@ -878,6 +904,33 @@ void CloseOverlay()
         DeleteObject(g_hScreenBitmap);
         g_hScreenBitmap = nullptr;
     }
+}
+
+// ============================================================================
+// Commit the current text block as a text annotation
+// ============================================================================
+void CommitTextBlock(HWND hWnd)
+{
+    if (g_isTypingText && g_textLen > 0)
+    {
+        DrawTextAnnotation ta = {};
+        ta.pos = g_textPos;
+        StringCchCopyW(ta.text, 256, g_textBuffer);
+        ta.color = g_colorPalette[g_currentColorIndex];
+        ta.fontSize = g_penThickness * 4 + 8;
+        g_texts.push_back(ta);
+
+        UndoEntry entry = {};
+        entry.type = ACTION_TEXT;
+        entry.startIndex = g_texts.size() - 1;
+        entry.count = 1;
+        g_undoHistory.push_back(entry);
+        g_redoHistory.clear();
+    }
+    g_isTypingText = false;
+    g_textLen = 0;
+    g_textBuffer[0] = L'\0';
+    if (hWnd) InvalidateRect(hWnd, nullptr, FALSE);
 }
 
 // ============================================================================
@@ -964,12 +1017,47 @@ void PaintOverlay(HWND hWnd, HDC hdc)
 
     SelectObject(hBufferDC, hOldBrush);
 
+    // Text annotations
+    SetBkMode(hBufferDC, TRANSPARENT);
+    for (const auto& ta : g_texts)
+    {
+        SetTextColor(hBufferDC, ta.color);
+        HFONT hFont = CreateFontW(ta.fontSize, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
+            DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
+        HFONT hOldFont = (HFONT)SelectObject(hBufferDC, hFont);
+        RECT rcText = { ta.pos.x, ta.pos.y, g_screenW, g_screenH };
+        DrawTextW(hBufferDC, ta.text, -1, &rcText, DT_NOCLIP | DT_SINGLELINE);
+        SelectObject(hBufferDC, hOldFont);
+        DeleteObject(hFont);
+    }
+
+    // In-progress text being typed
+    if (g_isTypingText && g_textLen > 0)
+    {
+        int fontSize = g_penThickness * 4 + 8;
+        COLORREF curColor = g_colorPalette[g_currentColorIndex];
+        SetTextColor(hBufferDC, curColor);
+        HFONT hFont = CreateFontW(fontSize, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
+            DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
+        HFONT hOldFont = (HFONT)SelectObject(hBufferDC, hFont);
+
+        // Draw the text with a cursor bar
+        WCHAR displayBuf[260] = {};
+        StringCchCopyW(displayBuf, 258, g_textBuffer);
+        StringCchCatW(displayBuf, 260, L"|");
+
+        RECT rcText = { g_textPos.x, g_textPos.y, g_screenW, g_screenH };
+        DrawTextW(hBufferDC, displayBuf, -1, &rcText, DT_NOCLIP | DT_SINGLELINE);
+        SelectObject(hBufferDC, hOldFont);
+        DeleteObject(hFont);
+    }
+
     // Help text
     SetBkMode(hBufferDC, TRANSPARENT);
     SetTextColor(hBufferDC, RGB(255, 255, 255));
 
     const WCHAR* helpText =
-        L"RMB: Draw  |  Ctrl+RMB: Rect  |  LMB: Save  |  Ctrl+LMB: Crop  |  "
+        L"RMB: Draw  |  Ctrl+RMB: Rect  |  Type: Text  |  LMB: Save  |  Ctrl+LMB: Crop  |  "
         L"Ctrl+Z/Y: Undo/Redo  |  Ctrl+Wheel: Size  |  Shift+Wheel: Color  |  Esc: Cancel";
 
     RECT rcText = { 0, 10, g_screenW, 40 };
@@ -1052,6 +1140,20 @@ void SaveAnnotatedScreenshot(const RECT* cropRect)
         Rectangle(hCompDC, r.rc.left, r.rc.top, r.rc.right, r.rc.bottom);
         SelectObject(hCompDC, hOldPen);
         DeleteObject(hPen);
+    }
+
+    // Text annotations
+    for (const auto& ta : g_texts)
+    {
+        // Draw text using GDI
+        SetTextColor(hCompDC, ta.color);
+        HFONT hFont = CreateFontW(ta.fontSize, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
+            DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
+        HFONT hOldFont = (HFONT)SelectObject(hCompDC, hFont);
+        RECT rcText = { ta.pos.x, ta.pos.y, g_screenW, g_screenH };
+        DrawTextW(hCompDC, ta.text, -1, &rcText, DT_NOCLIP | DT_SINGLELINE);
+        SelectObject(hCompDC, hOldFont);
+        DeleteObject(hFont);
     }
 
     SelectObject(hCompDC, hOldBrush);
@@ -1230,6 +1332,7 @@ LRESULT CALLBACK OverlayWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
 
     case WM_RBUTTONDOWN:
     {
+        CommitTextBlock(hWnd);
         POINT pt = { (SHORT)LOWORD(lParam), (SHORT)HIWORD(lParam) };
         bool ctrlHeld = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
 
@@ -1251,6 +1354,17 @@ LRESULT CALLBACK OverlayWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
     case WM_MOUSEMOVE:
     {
         POINT pt = { (SHORT)LOWORD(lParam), (SHORT)HIWORD(lParam) };
+
+        // If typing text, commit it when the mouse moves
+        if (g_isTypingText)
+        {
+            int dx = pt.x - g_lastMousePos.x;
+            int dy = pt.y - g_lastMousePos.y;
+            if (dx * dx + dy * dy > 16)
+            {
+                CommitTextBlock(hWnd);
+            }
+        }
 
         if (g_isDrawingFreehand && (wParam & MK_RBUTTON))
         {
@@ -1316,6 +1430,7 @@ LRESULT CALLBACK OverlayWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
 
     case WM_LBUTTONDOWN:
     {
+        CommitTextBlock(hWnd);
         POINT pt = { (SHORT)LOWORD(lParam), (SHORT)HIWORD(lParam) };
         bool ctrlHeld = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
 
@@ -1337,11 +1452,13 @@ LRESULT CALLBACK OverlayWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
         {
             g_cropRect = NormalizeRect(g_cropStart, pt);
             g_isCropping = false;
+            CommitTextBlock(hWnd);
             SaveAnnotatedScreenshot(&g_cropRect);
             CloseOverlay();
         }
         else if (!g_isCropping)
         {
+            CommitTextBlock(hWnd);
             SaveAnnotatedScreenshot(nullptr);
             CloseOverlay();
         }
@@ -1361,7 +1478,6 @@ LRESULT CALLBACK OverlayWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
 
         if (ctrlHeld)
         {
-            // Ctrl + mouse wheel: change pen thickness
             if (zDelta > 0)
                 g_penThickness = min(g_penThickness + 1, PEN_THICKNESS_MAX);
             else
@@ -1370,7 +1486,6 @@ LRESULT CALLBACK OverlayWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
         }
         else if (shiftHeld)
         {
-            // Shift + mouse wheel: cycle annotation color
             if (zDelta > 0)
                 g_currentColorIndex = (g_currentColorIndex + 1) % g_colorCount;
             else
@@ -1384,14 +1499,63 @@ LRESULT CALLBACK OverlayWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
         SetCursor(LoadCursor(nullptr, IDC_CROSS));
         return TRUE;
 
+    case WM_CHAR:
+    {
+        WCHAR ch = (WCHAR)wParam;
+        // Ignore control characters (below space), allow printable chars and space
+        if (ch < L' ')
+            break;
+
+        // Start typing if not already
+        if (!g_isTypingText)
+        {
+            g_isTypingText = true;
+            g_textPos = g_lastMousePos;
+            g_textLen = 0;
+            g_textBuffer[0] = L'\0';
+        }
+
+        // Append character
+        if (g_textLen < 255)
+        {
+            g_textBuffer[g_textLen++] = ch;
+            g_textBuffer[g_textLen] = L'\0';
+            InvalidateRect(hWnd, nullptr, FALSE);
+        }
+    }
+    break;
+
     case WM_KEYDOWN:
         if (wParam == VK_ESCAPE)
         {
-            CloseOverlay();
+            if (g_isTypingText)
+            {
+                // Cancel current text without committing
+                g_isTypingText = false;
+                g_textLen = 0;
+                g_textBuffer[0] = L'\0';
+                InvalidateRect(hWnd, nullptr, FALSE);
+            }
+            else
+            {
+                CloseOverlay();
+            }
+        }
+        else if (wParam == VK_RETURN && g_isTypingText)
+        {
+            CommitTextBlock(hWnd);
+        }
+        else if (wParam == VK_BACK && g_isTypingText)
+        {
+            if (g_textLen > 0)
+            {
+                g_textBuffer[--g_textLen] = L'\0';
+                InvalidateRect(hWnd, nullptr, FALSE);
+            }
         }
         else if (wParam == 'Z' && (GetKeyState(VK_CONTROL) & 0x8000))
         {
-            // Ctrl+Z: Undo
+            CommitTextBlock(hWnd);
             if (!g_undoHistory.empty())
             {
                 UndoEntry last = g_undoHistory.back();
@@ -1416,6 +1580,14 @@ LRESULT CALLBACK OverlayWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
                         g_rects.erase(g_rects.begin() + last.startIndex, g_rects.end());
                     }
                 }
+                else if (last.type == ACTION_TEXT)
+                {
+                    if (last.startIndex < g_texts.size())
+                    {
+                        redo.texts.assign(g_texts.begin() + last.startIndex, g_texts.end());
+                        g_texts.erase(g_texts.begin() + last.startIndex, g_texts.end());
+                    }
+                }
 
                 g_redoHistory.push_back(std::move(redo));
                 InvalidateRect(hWnd, nullptr, FALSE);
@@ -1423,7 +1595,7 @@ LRESULT CALLBACK OverlayWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
         }
         else if (wParam == 'Y' && (GetKeyState(VK_CONTROL) & 0x8000))
         {
-            // Ctrl+Y: Redo
+            CommitTextBlock(hWnd);
             if (!g_redoHistory.empty())
             {
                 RedoEntry redo = std::move(g_redoHistory.back());
@@ -1440,6 +1612,12 @@ LRESULT CALLBACK OverlayWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
                     redo.undoInfo.startIndex = g_rects.size();
                     redo.undoInfo.count = redo.rects.size();
                     g_rects.insert(g_rects.end(), redo.rects.begin(), redo.rects.end());
+                }
+                else if (redo.undoInfo.type == ACTION_TEXT)
+                {
+                    redo.undoInfo.startIndex = g_texts.size();
+                    redo.undoInfo.count = redo.texts.size();
+                    g_texts.insert(g_texts.end(), redo.texts.begin(), redo.texts.end());
                 }
 
                 g_undoHistory.push_back(redo.undoInfo);
