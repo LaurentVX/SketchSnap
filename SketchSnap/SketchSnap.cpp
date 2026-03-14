@@ -1,4 +1,4 @@
-﻿// SketchSnap.cpp : Defines the entry point for the application.
+// SketchSnap.cpp : Defines the entry point for the application.
 //
 
 #include "framework.h"
@@ -9,8 +9,11 @@
 #include <gdiplus.h>
 #include <strsafe.h>
 #include <vector>
+#include <mmsystem.h>
+#include <commdlg.h>
 
 #pragma comment(lib, "gdiplus.lib")
+#pragma comment(lib, "winmm.lib")
 
 #define MAX_LOADSTRING 100
 
@@ -40,6 +43,9 @@
 #define IDC_RADIO_JPG           3004
 #define IDC_BTN_OK              3005
 #define IDC_BTN_CANCEL          3006
+#define IDC_CHK_SOUND           3007
+#define IDC_EDIT_SOUND          3008
+#define IDC_BTN_SOUND_BROWSE    3009
 
 // Registry key for persisting settings
 static const WCHAR* REG_KEY = L"Software\\SketchSnap";
@@ -69,6 +75,10 @@ int g_toastAlpha = 0;
 WCHAR g_saveFolderPath[MAX_PATH] = {};  // where to save screenshots
 enum ImageFormat { FMT_PNG = 0, FMT_JPG = 1 };
 ImageFormat g_imageFormat = FMT_PNG;
+
+// --- Sound settings ---
+bool g_soundEnabled = true;
+WCHAR g_soundFilePath[MAX_PATH] = L"C:\\Windows\\Media\\Windows Ding.wav";
 
 // --- Overlay state ---
 HWND g_hOverlay = nullptr;
@@ -152,6 +162,7 @@ void                EnsureSaveFolderExists();
 void                ShowSettingsDialog(HWND hParent);
 void                ShowToast(const WCHAR* filePath);
 void                DismissToast();
+void                PlayNotificationSound();
 
 // ============================================================================
 // Settings: load from registry (with defaults)
@@ -163,6 +174,8 @@ void LoadSettings()
     SHGetFolderPathW(nullptr, CSIDL_MYPICTURES, nullptr, 0, picturesPath);
     StringCchPrintfW(g_saveFolderPath, MAX_PATH, L"%s\\SketchSnap", picturesPath);
     g_imageFormat = FMT_PNG;
+    g_soundEnabled = true;
+    StringCchCopyW(g_soundFilePath, MAX_PATH, L"C:\\Windows\\Media\\Windows Ding.wav");
 
     HKEY hKey = nullptr;
     if (RegOpenKeyExW(HKEY_CURRENT_USER, REG_KEY, 0, KEY_READ, &hKey) == ERROR_SUCCESS)
@@ -178,6 +191,18 @@ void LoadSettings()
         {
             g_imageFormat = (fmt == 1) ? FMT_JPG : FMT_PNG;
         }
+
+        DWORD sndEnabled = 1;
+        DWORD cbSnd = sizeof(sndEnabled);
+        if (RegQueryValueExW(hKey, L"SoundEnabled", nullptr, nullptr,
+            (LPBYTE)&sndEnabled, &cbSnd) == ERROR_SUCCESS)
+        {
+            g_soundEnabled = (sndEnabled != 0);
+        }
+
+        DWORD cbSndPath = sizeof(g_soundFilePath);
+        RegQueryValueExW(hKey, L"SoundFile", nullptr, nullptr,
+            (LPBYTE)g_soundFilePath, &cbSndPath);
 
         RegCloseKey(hKey);
     }
@@ -201,6 +226,14 @@ void SaveSettings()
         DWORD fmt = (DWORD)g_imageFormat;
         RegSetValueExW(hKey, L"ImageFormat", 0, REG_DWORD,
             (const BYTE*)&fmt, sizeof(fmt));
+
+        DWORD sndEnabled = g_soundEnabled ? 1 : 0;
+        RegSetValueExW(hKey, L"SoundEnabled", 0, REG_DWORD,
+            (const BYTE*)&sndEnabled, sizeof(sndEnabled));
+
+        RegSetValueExW(hKey, L"SoundFile", 0, REG_SZ,
+            (const BYTE*)g_soundFilePath,
+            (DWORD)((wcslen(g_soundFilePath) + 1) * sizeof(WCHAR)));
 
         RegCloseKey(hKey);
     }
@@ -291,21 +324,40 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
         // Set current selection
         CheckDlgButton(hDlg, (g_imageFormat == FMT_PNG) ? IDC_RADIO_PNG : IDC_RADIO_JPG, BST_CHECKED);
 
+        // --- Sound checkbox ---
+        HWND hChkSound = CreateWindowW(L"BUTTON", L"Play sound",
+            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+            10, 75, 100, 20, hDlg, (HMENU)(INT_PTR)IDC_CHK_SOUND, hInst, nullptr);
+        SendMessage(hChkSound, WM_SETFONT, (WPARAM)hFont, TRUE);
+        CheckDlgButton(hDlg, IDC_CHK_SOUND, g_soundEnabled ? BST_CHECKED : BST_UNCHECKED);
+
+        // --- Sound file path edit ---
+        HWND hSoundEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", g_soundFilePath,
+            WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_LEFT,
+            120, 75, 180, 22, hDlg, (HMENU)(INT_PTR)IDC_EDIT_SOUND, hInst, nullptr);
+        SendMessage(hSoundEdit, WM_SETFONT, (WPARAM)hFont, TRUE);
+
+        // --- Sound browse button ---
+        HWND hSoundBrowse = CreateWindowW(L"BUTTON", L"...",
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            308, 75, 30, 22, hDlg, (HMENU)(INT_PTR)IDC_BTN_SOUND_BROWSE, hInst, nullptr);
+        SendMessage(hSoundBrowse, WM_SETFONT, (WPARAM)hFont, TRUE);
+
         // --- OK button ---
         HWND hOk = CreateWindowW(L"BUTTON", L"OK",
             WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
-            240, 75, 80, 26, hDlg, (HMENU)(INT_PTR)IDC_BTN_OK, hInst, nullptr);
+            240, 110, 80, 26, hDlg, (HMENU)(INT_PTR)IDC_BTN_OK, hInst, nullptr);
         SendMessage(hOk, WM_SETFONT, (WPARAM)hFont, TRUE);
 
         // --- Cancel button ---
         HWND hCancel = CreateWindowW(L"BUTTON", L"Cancel",
             WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-            324, 75, 80, 26, hDlg, (HMENU)(INT_PTR)IDC_BTN_CANCEL, hInst, nullptr);
+            324, 110, 80, 26, hDlg, (HMENU)(INT_PTR)IDC_BTN_CANCEL, hInst, nullptr);
         SendMessage(hCancel, WM_SETFONT, (WPARAM)hFont, TRUE);
 
-        // Resize dialog to fit controls (dialog units → pixels are tricky,
+        // Resize dialog to fit controls (dialog units ? pixels are tricky,
         // so just SetWindowPos to a fixed pixel size)
-        SetWindowPos(hDlg, nullptr, 0, 0, 420, 145,
+        SetWindowPos(hDlg, nullptr, 0, 0, 420, 185,
             SWP_NOMOVE | SWP_NOZORDER);
 
         return (INT_PTR)TRUE;
@@ -336,6 +388,28 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
         }
         break;
 
+        case IDC_BTN_SOUND_BROWSE:
+        {
+            // Open file picker for sound file
+            WCHAR soundPath[MAX_PATH] = {};
+            GetDlgItemTextW(hDlg, IDC_EDIT_SOUND, soundPath, MAX_PATH);
+
+            OPENFILENAMEW ofn = {};
+            ofn.lStructSize = sizeof(ofn);
+            ofn.hwndOwner = hDlg;
+            ofn.lpstrFilter = L"Wave Files (*.wav)\0*.wav\0All Files (*.*)\0*.*\0";
+            ofn.lpstrFile = soundPath;
+            ofn.nMaxFile = MAX_PATH;
+            ofn.lpstrTitle = L"Select Sound File";
+            ofn.Flags = OFN_PATHMUSTEXIST | OFN_FILEMUSTEXIST;
+
+            if (GetOpenFileNameW(&ofn))
+            {
+                SetDlgItemTextW(hDlg, IDC_EDIT_SOUND, soundPath);
+            }
+        }
+        break;
+
         case IDC_BTN_OK:
         {
             // Read folder path
@@ -343,6 +417,10 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
 
             // Read format
             g_imageFormat = IsDlgButtonChecked(hDlg, IDC_RADIO_JPG) ? FMT_JPG : FMT_PNG;
+
+            // Read sound settings
+            g_soundEnabled = IsDlgButtonChecked(hDlg, IDC_CHK_SOUND) == BST_CHECKED;
+            GetDlgItemTextW(hDlg, IDC_EDIT_SOUND, g_soundFilePath, MAX_PATH);
 
             // Persist and ensure folder exists
             SaveSettings();
@@ -368,7 +446,7 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
 }
 
 // ============================================================================
-// Toast notification — custom popup at bottom-right, click to open folder
+// Toast notification � custom popup at bottom-right, click to open folder
 // ============================================================================
 void DismissToast()
 {
@@ -408,6 +486,15 @@ void ShowToast(const WCHAR* filePath)
     UpdateWindow(g_hToast);
 
     SetTimer(g_hToast, IDT_TOAST_FADEIN, TOAST_FADE_STEP_MS, nullptr);
+}
+
+void PlayNotificationSound()
+{
+    if (g_soundEnabled && g_soundFilePath[0] != L'\0')
+    {
+        // Play the notification sound using the Windows multimedia API
+        PlaySoundW(g_soundFilePath, nullptr, SND_FILENAME | SND_ASYNC | SND_NODEFAULT);
+    }
 }
 
 LRESULT CALLBACK ToastWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
@@ -646,7 +733,7 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam)
 }
 
 // ============================================================================
-// InitInstance — tray icon + hotkeys
+// InitInstance � tray icon + hotkeys
 // ============================================================================
 BOOL InitInstance(HINSTANCE hInstance, int nCmdShow)
 {
@@ -710,6 +797,8 @@ void ShowOverlay()
 {
     if (g_hOverlay)
         return;
+
+    PlayNotificationSound();
 
     g_screenX = GetSystemMetrics(SM_XVIRTUALSCREEN);
     g_screenY = GetSystemMetrics(SM_YVIRTUALSCREEN);
@@ -1051,6 +1140,9 @@ void SaveAnnotatedScreenshot(const RECT* cropRect)
 
     // Show custom toast notification
     ShowToast(filePath);
+
+    // Play sound on screenshot save
+    PlayNotificationSound();
 }
 
 // ============================================================================
