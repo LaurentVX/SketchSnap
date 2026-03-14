@@ -1310,6 +1310,7 @@ void SaveAnnotatedScreenshot(const RECT* cropRect)
     }
 
     // Text annotations
+    SetBkMode(hCompDC, TRANSPARENT);
     for (const auto& ta : g_texts)
     {
         // Draw text using GDI
