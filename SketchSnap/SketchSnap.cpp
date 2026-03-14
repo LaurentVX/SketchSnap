@@ -80,12 +80,40 @@ struct DrawLine
 {
     POINT pt1;
     POINT pt2;
+    COLORREF color;
+    int thickness;
 };
 
 struct DrawRect
 {
     RECT rc;
+    COLORREF color;
+    int thickness;
 };
+
+// Annotation color palette
+static const COLORREF g_colorPalette[] =
+{
+    RGB(255, 0, 0),      // Red (default)
+    RGB(255, 200, 0),    // Yellow
+    RGB(0, 200, 0),      // Green
+    RGB(255, 128, 0),    // Orange
+    RGB(160, 32, 240),   // Purple
+    RGB(139, 69, 19),    // Brown
+};
+static const WCHAR* g_colorNames[] =
+{
+    L"Red", L"Yellow", L"Green", L"Orange", L"Purple", L"Brown"
+};
+static const int g_colorCount = sizeof(g_colorPalette) / sizeof(g_colorPalette[0]);
+
+int g_currentColorIndex = 0;   // index into g_colorPalette (default: Red)
+int g_penThickness = 3;        // freehand pen thickness (min 1, max 20)
+static const int PEN_THICKNESS_MIN = 1;
+static const int PEN_THICKNESS_MAX = 20;
+
+// Mouse position for cursor indicator
+POINT g_lastMousePos = {};
 
 std::vector<DrawLine> g_lines;
 std::vector<DrawRect> g_rects;
@@ -705,6 +733,8 @@ void ShowOverlay()
     g_isCropping = false;
     g_currentRect = {};
     g_cropRect = {};
+    g_currentColorIndex = 0;  // reset to Red
+    g_penThickness = 3;       // reset to default thickness
 
     // Create a topmost popup window covering the entire virtual screen
     g_hOverlay = CreateWindowExW(
@@ -771,62 +801,93 @@ void PaintOverlay(HWND hWnd, HDC hdc)
         DeleteDC(hDimDC);
     }
 
-    // Freehand lines
-    HPEN hRedPen = CreatePen(PS_SOLID, 3, RGB(255, 0, 0));
-    HPEN hOldPen = (HPEN)SelectObject(hdc, hRedPen);
-
+    // Freehand lines (each with its own color and thickness)
     for (const auto& line : g_lines)
     {
+        HPEN hPen = CreatePen(PS_SOLID, line.thickness, line.color);
+        HPEN hOldPen = (HPEN)SelectObject(hdc, hPen);
         MoveToEx(hdc, line.pt1.x, line.pt1.y, nullptr);
         LineTo(hdc, line.pt2.x, line.pt2.y);
+        SelectObject(hdc, hOldPen);
+        DeleteObject(hPen);
     }
 
-    // Rectangles
-    HPEN hRectPen = CreatePen(PS_SOLID, 2, RGB(255, 0, 0));
-    SelectObject(hdc, hRectPen);
+    // Rectangles (each with its own color and thickness)
     HBRUSH hNullBrush = (HBRUSH)GetStockObject(NULL_BRUSH);
     HBRUSH hOldBrush = (HBRUSH)SelectObject(hdc, hNullBrush);
 
     for (const auto& r : g_rects)
     {
+        HPEN hPen = CreatePen(PS_SOLID, r.thickness, r.color);
+        HPEN hOldPen = (HPEN)SelectObject(hdc, hPen);
         Rectangle(hdc, r.rc.left, r.rc.top, r.rc.right, r.rc.bottom);
+        SelectObject(hdc, hOldPen);
+        DeleteObject(hPen);
     }
 
     if (g_isDrawingRect)
     {
-        HPEN hDashPen = CreatePen(PS_DASH, 2, RGB(255, 0, 0));
-        SelectObject(hdc, hDashPen);
+        HPEN hDashPen = CreatePen(PS_DASH, g_penThickness, g_colorPalette[g_currentColorIndex]);
+        HPEN hOldPen = (HPEN)SelectObject(hdc, hDashPen);
         Rectangle(hdc, g_currentRect.left, g_currentRect.top,
             g_currentRect.right, g_currentRect.bottom);
-        SelectObject(hdc, hRectPen);
+        SelectObject(hdc, hOldPen);
         DeleteObject(hDashPen);
     }
 
     if (g_isCropping)
     {
         HPEN hCropPen = CreatePen(PS_DASH, 2, RGB(0, 200, 255));
-        SelectObject(hdc, hCropPen);
+        HPEN hOldPen = (HPEN)SelectObject(hdc, hCropPen);
         Rectangle(hdc, g_cropRect.left, g_cropRect.top,
             g_cropRect.right, g_cropRect.bottom);
-        SelectObject(hdc, hRectPen);
+        SelectObject(hdc, hOldPen);
         DeleteObject(hCropPen);
     }
 
     SelectObject(hdc, hOldBrush);
-    SelectObject(hdc, hOldPen);
-    DeleteObject(hRedPen);
-    DeleteObject(hRectPen);
 
     // Help text
     SetBkMode(hdc, TRANSPARENT);
     SetTextColor(hdc, RGB(255, 255, 255));
 
     const WCHAR* helpText =
-        L"RMB: Draw  |  Ctrl+RMB: Rectangle  |  LMB click: Save full  |  "
-        L"Ctrl+LMB drag: Crop  |  Esc: Cancel";
+        L"RMB: Draw  |  Ctrl+RMB: Rect  |  LMB: Save  |  Ctrl+LMB: Crop  |  "
+        L"Ctrl+Wheel: Size  |  Shift+Wheel: Color  |  Esc: Cancel";
 
     RECT rcText = { 0, 10, g_screenW, 40 };
     DrawTextW(hdc, helpText, -1, &rcText, DT_CENTER | DT_SINGLELINE);
+
+    // --- Cursor color/thickness indicator ---
+    {
+        COLORREF curColor = g_colorPalette[g_currentColorIndex];
+        int cx = g_lastMousePos.x;
+        int cy = g_lastMousePos.y;
+
+        // Draw a filled circle at cursor position showing current color and size
+        int radius = max(g_penThickness / 2, 2);
+        HBRUSH hFillBrush = CreateSolidBrush(curColor);
+        HPEN hOutlinePen = CreatePen(PS_SOLID, 1, RGB(255, 255, 255));
+        HPEN hPrevPen = (HPEN)SelectObject(hdc, hOutlinePen);
+        HBRUSH hPrevBrush = (HBRUSH)SelectObject(hdc, hFillBrush);
+        Ellipse(hdc, cx - radius, cy - radius, cx + radius, cy + radius);
+        SelectObject(hdc, hPrevBrush);
+        SelectObject(hdc, hPrevPen);
+        DeleteObject(hFillBrush);
+        DeleteObject(hOutlinePen);
+
+        // Draw color name + thickness label near cursor
+        WCHAR label[64] = {};
+        StringCchPrintfW(label, 64, L"%s  [%d]", g_colorNames[g_currentColorIndex], g_penThickness);
+        HFONT hLabelFont = CreateFontW(14, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
+            DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
+        HFONT hPrevFont = (HFONT)SelectObject(hdc, hLabelFont);
+        SetTextColor(hdc, curColor);
+        RECT rcLabel = { cx + radius + 6, cy - 8, cx + radius + 160, cy + 12 };
+        DrawTextW(hdc, label, -1, &rcLabel, DT_LEFT | DT_SINGLELINE | DT_NOCLIP);
+        SelectObject(hdc, hPrevFont);
+        DeleteObject(hLabelFont);
+    }
 }
 
 // ============================================================================
@@ -847,29 +908,29 @@ void SaveAnnotatedScreenshot(const RECT* cropRect)
     DeleteDC(hSrcDC);
 
     // Annotations
-    HPEN hRedPen = CreatePen(PS_SOLID, 3, RGB(255, 0, 0));
-    HPEN hOldPen = (HPEN)SelectObject(hCompDC, hRedPen);
-
     for (const auto& line : g_lines)
     {
+        HPEN hPen = CreatePen(PS_SOLID, line.thickness, line.color);
+        HPEN hOldPen = (HPEN)SelectObject(hCompDC, hPen);
         MoveToEx(hCompDC, line.pt1.x, line.pt1.y, nullptr);
         LineTo(hCompDC, line.pt2.x, line.pt2.y);
+        SelectObject(hCompDC, hOldPen);
+        DeleteObject(hPen);
     }
 
-    HPEN hRectPen = CreatePen(PS_SOLID, 2, RGB(255, 0, 0));
-    SelectObject(hCompDC, hRectPen);
     HBRUSH hNullBrush = (HBRUSH)GetStockObject(NULL_BRUSH);
     HBRUSH hOldBrush = (HBRUSH)SelectObject(hCompDC, hNullBrush);
 
     for (const auto& r : g_rects)
     {
+        HPEN hPen = CreatePen(PS_SOLID, r.thickness, r.color);
+        HPEN hOldPen = (HPEN)SelectObject(hCompDC, hPen);
         Rectangle(hCompDC, r.rc.left, r.rc.top, r.rc.right, r.rc.bottom);
+        SelectObject(hCompDC, hOldPen);
+        DeleteObject(hPen);
     }
 
     SelectObject(hCompDC, hOldBrush);
-    SelectObject(hCompDC, hOldPen);
-    DeleteObject(hRedPen);
-    DeleteObject(hRectPen);
 
     // Determine save region
     HBITMAP hSaveBmp = nullptr;
@@ -938,6 +999,49 @@ void SaveAnnotatedScreenshot(const RECT* cropRect)
                 bitmap.Save(filePath, &clsid, nullptr);
             }
         }
+    }
+
+    // Copy to clipboard
+    {
+        // Get bitmap dimensions
+        BITMAP bm = {};
+        GetObject(hSaveBmp, sizeof(bm), &bm);
+
+        BITMAPINFOHEADER bi = {};
+        bi.biSize = sizeof(BITMAPINFOHEADER);
+        bi.biWidth = bm.bmWidth;
+        bi.biHeight = bm.bmHeight;
+        bi.biPlanes = 1;
+        bi.biBitCount = 32;
+        bi.biCompression = BI_RGB;
+
+        DWORD dwBmpSize = bm.bmWidth * bm.bmHeight * 4;
+
+        HDC hDC = GetDC(nullptr);
+        HGLOBAL hDIB = GlobalAlloc(GMEM_MOVEABLE, sizeof(BITMAPINFOHEADER) + dwBmpSize);
+        if (hDIB)
+        {
+            void* pDIB = GlobalLock(hDIB);
+            if (pDIB)
+            {
+                memcpy(pDIB, &bi, sizeof(BITMAPINFOHEADER));
+                GetDIBits(hDC, hSaveBmp, 0, bm.bmHeight,
+                    (BYTE*)pDIB + sizeof(BITMAPINFOHEADER),
+                    (BITMAPINFO*)pDIB, DIB_RGB_COLORS);
+                GlobalUnlock(hDIB);
+
+                if (OpenClipboard(nullptr))
+                {
+                    EmptyClipboard();
+                    SetClipboardData(CF_DIB, hDIB);
+                    CloseClipboard();
+                    hDIB = nullptr; // clipboard owns it now
+                }
+            }
+            if (hDIB)
+                GlobalFree(hDIB);
+        }
+        ReleaseDC(nullptr, hDC);
     }
 
     DeleteObject(hSaveBmp);
@@ -1022,23 +1126,24 @@ LRESULT CALLBACK OverlayWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
 
         if (g_isDrawingFreehand && (wParam & MK_RBUTTON))
         {
-            DrawLine line = { g_lastFreehandPt, pt };
+            DrawLine line = { g_lastFreehandPt, pt, g_colorPalette[g_currentColorIndex], g_penThickness };
             g_lines.push_back(line);
             g_lastFreehandPt = pt;
-            InvalidateRect(hWnd, nullptr, FALSE);
         }
 
         if (g_isDrawingRect && (wParam & MK_RBUTTON))
         {
             g_currentRect = NormalizeRect(g_rectStartPt, pt);
-            InvalidateRect(hWnd, nullptr, FALSE);
         }
 
         if (g_isCropping && (wParam & MK_LBUTTON))
         {
             g_cropRect = NormalizeRect(g_cropStart, pt);
-            InvalidateRect(hWnd, nullptr, FALSE);
         }
+
+        // Update mouse position for cursor indicator
+        g_lastMousePos = pt;
+        InvalidateRect(hWnd, nullptr, FALSE);
     }
     break;
 
@@ -1049,7 +1154,7 @@ LRESULT CALLBACK OverlayWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
         if (g_isDrawingRect)
         {
             g_currentRect = NormalizeRect(g_rectStartPt, pt);
-            DrawRect dr = { g_currentRect };
+            DrawRect dr = { g_currentRect, g_colorPalette[g_currentColorIndex], g_penThickness };
             g_rects.push_back(dr);
             g_isDrawingRect = false;
             g_currentRect = {};
@@ -1098,6 +1203,37 @@ LRESULT CALLBACK OverlayWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
         }
     }
     break;
+
+    case WM_MOUSEWHEEL:
+    {
+        short zDelta = GET_WHEEL_DELTA_WPARAM(wParam);
+        bool ctrlHeld = (GET_KEYSTATE_WPARAM(wParam) & MK_CONTROL) != 0;
+        bool shiftHeld = (GET_KEYSTATE_WPARAM(wParam) & MK_SHIFT) != 0;
+
+        if (ctrlHeld)
+        {
+            // Ctrl + mouse wheel: change pen thickness
+            if (zDelta > 0)
+                g_penThickness = min(g_penThickness + 1, PEN_THICKNESS_MAX);
+            else
+                g_penThickness = max(g_penThickness - 1, PEN_THICKNESS_MIN);
+            InvalidateRect(hWnd, nullptr, FALSE);
+        }
+        else if (shiftHeld)
+        {
+            // Shift + mouse wheel: cycle annotation color
+            if (zDelta > 0)
+                g_currentColorIndex = (g_currentColorIndex + 1) % g_colorCount;
+            else
+                g_currentColorIndex = (g_currentColorIndex - 1 + g_colorCount) % g_colorCount;
+            InvalidateRect(hWnd, nullptr, FALSE);
+        }
+    }
+    break;
+
+    case WM_SETCURSOR:
+        SetCursor(LoadCursor(nullptr, IDC_CROSS));
+        return TRUE;
 
     case WM_KEYDOWN:
         if (wParam == VK_ESCAPE)
