@@ -1,8 +1,8 @@
-﻿// ScreenShotTaker.cpp : Defines the entry point for the application.
+﻿// SketchSnap.cpp : Defines the entry point for the application.
 //
 
 #include "framework.h"
-#include "ScreenShotTaker.h"
+#include "SketchSnap.h"
 
 #include <shellapi.h>
 #include <shlobj.h>
@@ -42,7 +42,7 @@
 #define IDC_BTN_CANCEL          3006
 
 // Registry key for persisting settings
-static const WCHAR* REG_KEY = L"Software\\ScreenShotTaker";
+static const WCHAR* REG_KEY = L"Software\\SketchSnap";
 
 // Overlay window class name
 static const WCHAR* OVERLAY_CLASS = L"ScreenShotOverlayClass";
@@ -130,10 +130,10 @@ void                DismissToast();
 // ============================================================================
 void LoadSettings()
 {
-    // Default: Pictures\ScreenShotTaker
+    // Default: Pictures\SketchSnap
     WCHAR picturesPath[MAX_PATH] = {};
     SHGetFolderPathW(nullptr, CSIDL_MYPICTURES, nullptr, 0, picturesPath);
-    StringCchPrintfW(g_saveFolderPath, MAX_PATH, L"%s\\ScreenShotTaker", picturesPath);
+    StringCchPrintfW(g_saveFolderPath, MAX_PATH, L"%s\\SketchSnap", picturesPath);
     g_imageFormat = FMT_PNG;
 
     HKEY hKey = nullptr;
@@ -514,7 +514,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
 
     // Initialize global strings
     LoadStringW(hInstance, IDS_APP_TITLE, szTitle, MAX_LOADSTRING);
-    LoadStringW(hInstance, IDC_SCREENSHOTTAKER, szWindowClass, MAX_LOADSTRING);
+    LoadStringW(hInstance, IDC_SketchSnap, szWindowClass, MAX_LOADSTRING);
     MyRegisterClass(hInstance);
 
     // Register overlay window class
@@ -545,7 +545,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
         return FALSE;
     }
 
-    HACCEL hAccelTable = LoadAccelerators(hInstance, MAKEINTRESOURCE(IDC_SCREENSHOTTAKER));
+    HACCEL hAccelTable = LoadAccelerators(hInstance, MAKEINTRESOURCE(IDC_SketchSnap));
 
     MSG msg;
 
@@ -591,10 +591,10 @@ ATOM MyRegisterClass(HINSTANCE hInstance)
     wcex.cbClsExtra     = 0;
     wcex.cbWndExtra     = 0;
     wcex.hInstance      = hInstance;
-    wcex.hIcon          = LoadIcon(hInstance, MAKEINTRESOURCE(IDI_SCREENSHOTTAKER));
+    wcex.hIcon          = LoadIcon(hInstance, MAKEINTRESOURCE(IDI_SketchSnap));
     wcex.hCursor        = LoadCursor(nullptr, IDC_ARROW);
     wcex.hbrBackground  = (HBRUSH)(COLOR_WINDOW + 1);
-    wcex.lpszMenuName   = MAKEINTRESOURCEW(IDC_SCREENSHOTTAKER);
+    wcex.lpszMenuName   = MAKEINTRESOURCEW(IDC_SketchSnap);
     wcex.lpszClassName  = szWindowClass;
     wcex.hIconSm        = LoadIcon(wcex.hInstance, MAKEINTRESOURCE(IDI_SMALL));
 
@@ -642,8 +642,8 @@ BOOL InitInstance(HINSTANCE hInstance, int nCmdShow)
     nid.uID = 1;
     nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
     nid.uCallbackMessage = WM_TRAYICON;
-    nid.hIcon = LoadIcon(hInstance, MAKEINTRESOURCE(IDI_SCREENSHOTTAKER));
-    StringCchCopyW(nid.szTip, ARRAYSIZE(nid.szTip), L"ScreenShotTaker - PrtScr or Ctrl+Shift+S");
+    nid.hIcon = LoadIcon(hInstance, MAKEINTRESOURCE(IDI_SketchSnap));
+    StringCchCopyW(nid.szTip, ARRAYSIZE(nid.szTip), L"SketchSnap - PrtScr or Ctrl+Shift+S");
     Shell_NotifyIconW(NIM_ADD, &nid);
 
     nid.uVersion = NOTIFYICON_VERSION_4;
@@ -654,7 +654,7 @@ BOOL InitInstance(HINSTANCE hInstance, int nCmdShow)
     if (!RegisterHotKey(hWnd, ID_HOTKEY_CTRLSHIFT, MOD_CONTROL | MOD_SHIFT, 'S'))
     {
         MessageBoxW(hWnd, L"Failed to register Ctrl+Shift+S hotkey.",
-            L"ScreenShotTaker", MB_ICONWARNING);
+            L"SketchSnap", MB_ICONWARNING);
     }
 
     hKeyboardHook = SetWindowsHookExW(WH_KEYBOARD_LL, LowLevelKeyboardProc, hInstance, 0);
