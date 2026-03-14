@@ -46,6 +46,11 @@
 #define IDC_CHK_SOUND           3007
 #define IDC_EDIT_SOUND          3008
 #define IDC_BTN_SOUND_BROWSE    3009
+#define IDC_COMBO_COLOR         3010
+#define IDC_EDIT_SIZE           3011
+#define IDC_CHK_EDITOR          3012
+#define IDC_EDIT_EDITOR         3013
+#define IDC_BTN_EDITOR_BROWSE   3014
 
 // Registry key for persisting settings
 static const WCHAR* REG_KEY = L"Software\\SketchSnap";
@@ -79,6 +84,14 @@ ImageFormat g_imageFormat = FMT_PNG;
 // --- Sound settings ---
 bool g_soundEnabled = true;
 WCHAR g_soundFilePath[MAX_PATH] = L"C:\\Windows\\Media\\Windows Ding.wav";
+
+// --- Default annotation settings ---
+int g_defaultColorIndex = 0;    // index into g_colorPalette (0 = Red)
+int g_defaultPenThickness = 3;  // default pen thickness
+
+// --- Image editor settings ---
+bool g_openEditorEnabled = false;
+WCHAR g_editorPath[MAX_PATH] = L"mspaint.exe";
 
 // --- Overlay state ---
 HWND g_hOverlay = nullptr;
@@ -205,6 +218,7 @@ void                ShowToast(const WCHAR* filePath);
 void                DismissToast();
 void                PlayNotificationSound();
 void                CommitTextBlock(HWND hWnd);
+void                OpenInEditor(const WCHAR* filePath);
 
 // ============================================================================
 // Settings: load from registry (with defaults)
@@ -218,6 +232,10 @@ void LoadSettings()
     g_imageFormat = FMT_PNG;
     g_soundEnabled = true;
     StringCchCopyW(g_soundFilePath, MAX_PATH, L"C:\\Windows\\Media\\Windows Ding.wav");
+    g_defaultColorIndex = 0;
+    g_defaultPenThickness = 3;
+    g_openEditorEnabled = false;
+    StringCchCopyW(g_editorPath, MAX_PATH, L"mspaint.exe");
 
     HKEY hKey = nullptr;
     if (RegOpenKeyExW(HKEY_CURRENT_USER, REG_KEY, 0, KEY_READ, &hKey) == ERROR_SUCCESS)
@@ -245,6 +263,36 @@ void LoadSettings()
         DWORD cbSndPath = sizeof(g_soundFilePath);
         RegQueryValueExW(hKey, L"SoundFile", nullptr, nullptr,
             (LPBYTE)g_soundFilePath, &cbSndPath);
+
+        DWORD colorIdx = 0;
+        DWORD cbColor = sizeof(colorIdx);
+        if (RegQueryValueExW(hKey, L"DefaultColor", nullptr, nullptr,
+            (LPBYTE)&colorIdx, &cbColor) == ERROR_SUCCESS)
+        {
+            if ((int)colorIdx >= 0 && (int)colorIdx < g_colorCount)
+                g_defaultColorIndex = (int)colorIdx;
+        }
+
+        DWORD penSize = 3;
+        DWORD cbPen = sizeof(penSize);
+        if (RegQueryValueExW(hKey, L"DefaultPenSize", nullptr, nullptr,
+            (LPBYTE)&penSize, &cbPen) == ERROR_SUCCESS)
+        {
+            if ((int)penSize >= PEN_THICKNESS_MIN && (int)penSize <= PEN_THICKNESS_MAX)
+                g_defaultPenThickness = (int)penSize;
+        }
+
+        DWORD editorEnabled = 0;
+        DWORD cbEditor = sizeof(editorEnabled);
+        if (RegQueryValueExW(hKey, L"OpenEditorEnabled", nullptr, nullptr,
+            (LPBYTE)&editorEnabled, &cbEditor) == ERROR_SUCCESS)
+        {
+            g_openEditorEnabled = (editorEnabled != 0);
+        }
+
+        DWORD cbEditorPath = sizeof(g_editorPath);
+        RegQueryValueExW(hKey, L"EditorPath", nullptr, nullptr,
+            (LPBYTE)g_editorPath, &cbEditorPath);
 
         RegCloseKey(hKey);
     }
@@ -276,6 +324,22 @@ void SaveSettings()
         RegSetValueExW(hKey, L"SoundFile", 0, REG_SZ,
             (const BYTE*)g_soundFilePath,
             (DWORD)((wcslen(g_soundFilePath) + 1) * sizeof(WCHAR)));
+
+        DWORD colorIdx = (DWORD)g_defaultColorIndex;
+        RegSetValueExW(hKey, L"DefaultColor", 0, REG_DWORD,
+            (const BYTE*)&colorIdx, sizeof(colorIdx));
+
+        DWORD penSize = (DWORD)g_defaultPenThickness;
+        RegSetValueExW(hKey, L"DefaultPenSize", 0, REG_DWORD,
+            (const BYTE*)&penSize, sizeof(penSize));
+
+        DWORD editorEnabled = g_openEditorEnabled ? 1 : 0;
+        RegSetValueExW(hKey, L"OpenEditorEnabled", 0, REG_DWORD,
+            (const BYTE*)&editorEnabled, sizeof(editorEnabled));
+
+        RegSetValueExW(hKey, L"EditorPath", 0, REG_SZ,
+            (const BYTE*)g_editorPath,
+            (DWORD)((wcslen(g_editorPath) + 1) * sizeof(WCHAR)));
 
         RegCloseKey(hKey);
     }
@@ -385,21 +449,76 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
             308, 75, 30, 22, hDlg, (HMENU)(INT_PTR)IDC_BTN_SOUND_BROWSE, hInst, nullptr);
         SendMessage(hSoundBrowse, WM_SETFONT, (WPARAM)hFont, TRUE);
 
+        // --- "Default color:" label ---
+        HWND hColorLabel = CreateWindowW(L"STATIC", L"Default color:",
+            WS_CHILD | WS_VISIBLE | SS_LEFT,
+            10, 108, 80, 16, hDlg, nullptr, hInst, nullptr);
+        SendMessage(hColorLabel, WM_SETFONT, (WPARAM)hFont, TRUE);
+
+        // --- Color combo box ---
+        HWND hColorCombo = CreateWindowW(L"COMBOBOX", nullptr,
+            WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
+            100, 105, 100, 200, hDlg, (HMENU)(INT_PTR)IDC_COMBO_COLOR, hInst, nullptr);
+        SendMessage(hColorCombo, WM_SETFONT, (WPARAM)hFont, TRUE);
+        for (int i = 0; i < g_colorCount; i++)
+        {
+            SendMessageW(hColorCombo, CB_ADDSTRING, 0, (LPARAM)g_colorNames[i]);
+        }
+        SendMessageW(hColorCombo, CB_SETCURSEL, (WPARAM)g_defaultColorIndex, 0);
+
+        // --- "Default size:" label ---
+        HWND hSizeLabel = CreateWindowW(L"STATIC", L"Default size:",
+            WS_CHILD | WS_VISIBLE | SS_LEFT,
+            220, 108, 80, 16, hDlg, nullptr, hInst, nullptr);
+        SendMessage(hSizeLabel, WM_SETFONT, (WPARAM)hFont, TRUE);
+
+        // --- Size edit ---
+        WCHAR sizeBuf[8] = {};
+        StringCchPrintfW(sizeBuf, 8, L"%d", g_defaultPenThickness);
+        HWND hSizeEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", sizeBuf,
+            WS_CHILD | WS_VISIBLE | ES_NUMBER | ES_LEFT,
+            305, 105, 40, 22, hDlg, (HMENU)(INT_PTR)IDC_EDIT_SIZE, hInst, nullptr);
+        SendMessage(hSizeEdit, WM_SETFONT, (WPARAM)hFont, TRUE);
+
+        // --- "1-20" hint ---
+        HWND hSizeHint = CreateWindowW(L"STATIC", L"(1-20)",
+            WS_CHILD | WS_VISIBLE | SS_LEFT,
+            350, 108, 40, 16, hDlg, nullptr, hInst, nullptr);
+        SendMessage(hSizeHint, WM_SETFONT, (WPARAM)hFont, TRUE);
+
+        // --- Open in editor checkbox ---
+        HWND hChkEditor = CreateWindowW(L"BUTTON", L"Open in editor",
+            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+            10, 140, 110, 20, hDlg, (HMENU)(INT_PTR)IDC_CHK_EDITOR, hInst, nullptr);
+        SendMessage(hChkEditor, WM_SETFONT, (WPARAM)hFont, TRUE);
+        CheckDlgButton(hDlg, IDC_CHK_EDITOR, g_openEditorEnabled ? BST_CHECKED : BST_UNCHECKED);
+
+        // --- Editor path edit ---
+        HWND hEditorEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", g_editorPath,
+            WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_LEFT,
+            120, 138, 250, 22, hDlg, (HMENU)(INT_PTR)IDC_EDIT_EDITOR, hInst, nullptr);
+        SendMessage(hEditorEdit, WM_SETFONT, (WPARAM)hFont, TRUE);
+
+        // --- Editor browse button ---
+        HWND hEditorBrowse = CreateWindowW(L"BUTTON", L"...",
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            374, 138, 30, 22, hDlg, (HMENU)(INT_PTR)IDC_BTN_EDITOR_BROWSE, hInst, nullptr);
+        SendMessage(hEditorBrowse, WM_SETFONT, (WPARAM)hFont, TRUE);
+
         // --- OK button ---
         HWND hOk = CreateWindowW(L"BUTTON", L"OK",
             WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
-            240, 110, 80, 26, hDlg, (HMENU)(INT_PTR)IDC_BTN_OK, hInst, nullptr);
+            240, 172, 80, 26, hDlg, (HMENU)(INT_PTR)IDC_BTN_OK, hInst, nullptr);
         SendMessage(hOk, WM_SETFONT, (WPARAM)hFont, TRUE);
 
         // --- Cancel button ---
         HWND hCancel = CreateWindowW(L"BUTTON", L"Cancel",
             WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-            324, 110, 80, 26, hDlg, (HMENU)(INT_PTR)IDC_BTN_CANCEL, hInst, nullptr);
+            324, 172, 80, 26, hDlg, (HMENU)(INT_PTR)IDC_BTN_CANCEL, hInst, nullptr);
         SendMessage(hCancel, WM_SETFONT, (WPARAM)hFont, TRUE);
 
-        // Resize dialog to fit controls (dialog units ? pixels are tricky,
-        // so just SetWindowPos to a fixed pixel size)
-        SetWindowPos(hDlg, nullptr, 0, 0, 420, 185,
+        // Resize dialog to fit controls
+        SetWindowPos(hDlg, nullptr, 0, 0, 420, 248,
             SWP_NOMOVE | SWP_NOZORDER);
 
         return (INT_PTR)TRUE;
@@ -452,9 +571,30 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
         }
         break;
 
+        case IDC_BTN_EDITOR_BROWSE:
+        {
+            WCHAR editorPath[MAX_PATH] = {};
+            GetDlgItemTextW(hDlg, IDC_EDIT_EDITOR, editorPath, MAX_PATH);
+
+            OPENFILENAMEW ofn = {};
+            ofn.lStructSize = sizeof(ofn);
+            ofn.hwndOwner = hDlg;
+            ofn.lpstrFilter = L"Executables (*.exe)\0*.exe\0All Files (*.*)\0*.*\0";
+            ofn.lpstrFile = editorPath;
+            ofn.nMaxFile = MAX_PATH;
+            ofn.lpstrTitle = L"Select Image Editor";
+            ofn.Flags = OFN_PATHMUSTEXIST | OFN_FILEMUSTEXIST;
+
+            if (GetOpenFileNameW(&ofn))
+            {
+                SetDlgItemTextW(hDlg, IDC_EDIT_EDITOR, editorPath);
+            }
+        }
+        break;
+
         case IDC_BTN_OK:
         {
-            // Reread folder path
+            // Read folder path
             GetDlgItemTextW(hDlg, IDC_EDIT_FOLDER, g_saveFolderPath, MAX_PATH);
 
             // Read format
@@ -463,6 +603,22 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
             // Read sound settings
             g_soundEnabled = IsDlgButtonChecked(hDlg, IDC_CHK_SOUND) == BST_CHECKED;
             GetDlgItemTextW(hDlg, IDC_EDIT_SOUND, g_soundFilePath, MAX_PATH);
+
+            // Read default color
+            int sel = (int)SendDlgItemMessageW(hDlg, IDC_COMBO_COLOR, CB_GETCURSEL, 0, 0);
+            if (sel >= 0 && sel < g_colorCount)
+                g_defaultColorIndex = sel;
+
+            // Read default pen size
+            WCHAR sizeBuf[8] = {};
+            GetDlgItemTextW(hDlg, IDC_EDIT_SIZE, sizeBuf, 8);
+            int sz = _wtoi(sizeBuf);
+            if (sz >= PEN_THICKNESS_MIN && sz <= PEN_THICKNESS_MAX)
+                g_defaultPenThickness = sz;
+
+            // Read editor settings
+            g_openEditorEnabled = IsDlgButtonChecked(hDlg, IDC_CHK_EDITOR) == BST_CHECKED;
+            GetDlgItemTextW(hDlg, IDC_EDIT_EDITOR, g_editorPath, MAX_PATH);
 
             // Persist and ensure folder exists
             SaveSettings();
@@ -536,6 +692,17 @@ void PlayNotificationSound()
     {
         // Play the notification sound using the Windows multimedia API
         PlaySoundW(g_soundFilePath, nullptr, SND_FILENAME | SND_ASYNC | SND_NODEFAULT);
+    }
+}
+
+// ============================================================================
+// Open the saved screenshot in the configured image editor
+// ============================================================================
+void OpenInEditor(const WCHAR* filePath)
+{
+    if (g_openEditorEnabled && g_editorPath[0] != L'\0' && filePath && filePath[0] != L'\0')
+    {
+        ShellExecuteW(nullptr, L"open", g_editorPath, filePath, nullptr, SW_SHOWNORMAL);
     }
 }
 
@@ -870,8 +1037,8 @@ void ShowOverlay()
     g_textBuffer[0] = L'\0';
     g_currentRect = {};
     g_cropRect = {};
-    g_currentColorIndex = 0;  // reset to Red
-    g_penThickness = 3;       // reset to default thickness
+    g_currentColorIndex = g_defaultColorIndex;
+    g_penThickness = g_defaultPenThickness;
 
     // Create a topmost popup window covering the entire virtual screen
     g_hOverlay = CreateWindowExW(
@@ -1280,6 +1447,9 @@ void SaveAnnotatedScreenshot(const RECT* cropRect)
 
     // Play sound on screenshot save
     PlayNotificationSound();
+
+    // Open in image editor if enabled
+    OpenInEditor(filePath);
 }
 
 // ============================================================================
@@ -1659,7 +1829,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
             AppendMenuW(hMenu, MF_STRING, ID_TRAY_EXIT, L"Exit");
 
             SetForegroundWindow(hWnd);
-            TrackPopupMenu(hMenu, TPM_RIGHTBUTTON, pt.x, pt.y, 0, hWnd, nullptr);
+            TrackPopupMenu(hMenu, TPM_RIGHTBUTTON, pt.x, pt.y,  0, hWnd, nullptr);
             PostMessage(hWnd, WM_NULL, 0, 0);
             DestroyMenu(hMenu);
         }
