@@ -128,6 +128,26 @@ POINT g_lastMousePos = {};
 std::vector<DrawLine> g_lines;
 std::vector<DrawRect> g_rects;
 
+// Undo history — tracks each drawing action in order
+enum ActionType { ACTION_FREEHAND, ACTION_RECT };
+struct UndoEntry
+{
+    ActionType type;
+    size_t startIndex; // for freehand: first index in g_lines
+    size_t count;      // for freehand: number of line segments
+};
+std::vector<UndoEntry> g_undoHistory;
+size_t g_freehandStrokeStart = 0; // g_lines.size() when freehand stroke began
+
+// Redo history — stores removed drawing data for restoration
+struct RedoEntry
+{
+    UndoEntry undoInfo;
+    std::vector<DrawLine> lines;   // stored lines (for ACTION_FREEHAND)
+    std::vector<DrawRect> rects;   // stored rects (for ACTION_RECT)
+};
+std::vector<RedoEntry> g_redoHistory;
+
 // Right mouse drawing state
 bool g_isDrawingFreehand = false;
 POINT g_lastFreehandPt = {};
@@ -412,7 +432,7 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
 
         case IDC_BTN_OK:
         {
-            // Read folder path
+            // Reread folder path
             GetDlgItemTextW(hDlg, IDC_EDIT_FOLDER, g_saveFolderPath, MAX_PATH);
 
             // Read format
@@ -817,6 +837,8 @@ void ShowOverlay()
     // Clear previous annotations
     g_lines.clear();
     g_rects.clear();
+    g_undoHistory.clear();
+    g_redoHistory.clear();
     g_isDrawingFreehand = false;
     g_isDrawingRect = false;
     g_isCropping = false;
@@ -863,16 +885,22 @@ void CloseOverlay()
 // ============================================================================
 void PaintOverlay(HWND hWnd, HDC hdc)
 {
-    HDC hMemDC = CreateCompatibleDC(hdc);
+    // --- Double-buffer: create offscreen DC and bitmap ---
+    HDC hBufferDC = CreateCompatibleDC(hdc);
+    HBITMAP hBufferBmp = CreateCompatibleBitmap(hdc, g_screenW, g_screenH);
+    HBITMAP hBufferOld = (HBITMAP)SelectObject(hBufferDC, hBufferBmp);
+
+    // Draw screenshot into the buffer
+    HDC hMemDC = CreateCompatibleDC(hBufferDC);
     HBITMAP hOld = (HBITMAP)SelectObject(hMemDC, g_hScreenBitmap);
-    BitBlt(hdc, 0, 0, g_screenW, g_screenH, hMemDC, 0, 0, SRCCOPY);
+    BitBlt(hBufferDC, 0, 0, g_screenW, g_screenH, hMemDC, 0, 0, SRCCOPY);
     SelectObject(hMemDC, hOld);
     DeleteDC(hMemDC);
 
     // Blueish tint
     {
-        HDC hDimDC = CreateCompatibleDC(hdc);
-        HBITMAP hDimBmp = CreateCompatibleBitmap(hdc, g_screenW, g_screenH);
+        HDC hDimDC = CreateCompatibleDC(hBufferDC);
+        HBITMAP hDimBmp = CreateCompatibleBitmap(hBufferDC, g_screenW, g_screenH);
         HBITMAP hDimOld = (HBITMAP)SelectObject(hDimDC, hDimBmp);
 
         RECT rcFull = { 0, 0, g_screenW, g_screenH };
@@ -883,7 +911,7 @@ void PaintOverlay(HWND hWnd, HDC hdc)
         BLENDFUNCTION bf = {};
         bf.BlendOp = AC_SRC_OVER;
         bf.SourceConstantAlpha = 60;
-        AlphaBlend(hdc, 0, 0, g_screenW, g_screenH, hDimDC, 0, 0, g_screenW, g_screenH, bf);
+        AlphaBlend(hBufferDC, 0, 0, g_screenW, g_screenH, hDimDC, 0, 0, g_screenW, g_screenH, bf);
 
         SelectObject(hDimDC, hDimOld);
         DeleteObject(hDimBmp);
@@ -894,58 +922,58 @@ void PaintOverlay(HWND hWnd, HDC hdc)
     for (const auto& line : g_lines)
     {
         HPEN hPen = CreatePen(PS_SOLID, line.thickness, line.color);
-        HPEN hOldPen = (HPEN)SelectObject(hdc, hPen);
-        MoveToEx(hdc, line.pt1.x, line.pt1.y, nullptr);
-        LineTo(hdc, line.pt2.x, line.pt2.y);
-        SelectObject(hdc, hOldPen);
+        HPEN hOldPen = (HPEN)SelectObject(hBufferDC, hPen);
+        MoveToEx(hBufferDC, line.pt1.x, line.pt1.y, nullptr);
+        LineTo(hBufferDC, line.pt2.x, line.pt2.y);
+        SelectObject(hBufferDC, hOldPen);
         DeleteObject(hPen);
     }
 
     // Rectangles (each with its own color and thickness)
     HBRUSH hNullBrush = (HBRUSH)GetStockObject(NULL_BRUSH);
-    HBRUSH hOldBrush = (HBRUSH)SelectObject(hdc, hNullBrush);
+    HBRUSH hOldBrush = (HBRUSH)SelectObject(hBufferDC, hNullBrush);
 
     for (const auto& r : g_rects)
     {
         HPEN hPen = CreatePen(PS_SOLID, r.thickness, r.color);
-        HPEN hOldPen = (HPEN)SelectObject(hdc, hPen);
-        Rectangle(hdc, r.rc.left, r.rc.top, r.rc.right, r.rc.bottom);
-        SelectObject(hdc, hOldPen);
+        HPEN hOldPen = (HPEN)SelectObject(hBufferDC, hPen);
+        Rectangle(hBufferDC, r.rc.left, r.rc.top, r.rc.right, r.rc.bottom);
+        SelectObject(hBufferDC, hOldPen);
         DeleteObject(hPen);
     }
 
     if (g_isDrawingRect)
     {
         HPEN hDashPen = CreatePen(PS_DASH, g_penThickness, g_colorPalette[g_currentColorIndex]);
-        HPEN hOldPen = (HPEN)SelectObject(hdc, hDashPen);
-        Rectangle(hdc, g_currentRect.left, g_currentRect.top,
+        HPEN hOldPen = (HPEN)SelectObject(hBufferDC, hDashPen);
+        Rectangle(hBufferDC, g_currentRect.left, g_currentRect.top,
             g_currentRect.right, g_currentRect.bottom);
-        SelectObject(hdc, hOldPen);
+        SelectObject(hBufferDC, hOldPen);
         DeleteObject(hDashPen);
     }
 
     if (g_isCropping)
     {
         HPEN hCropPen = CreatePen(PS_DASH, 2, RGB(0, 200, 255));
-        HPEN hOldPen = (HPEN)SelectObject(hdc, hCropPen);
-        Rectangle(hdc, g_cropRect.left, g_cropRect.top,
+        HPEN hOldPen = (HPEN)SelectObject(hBufferDC, hCropPen);
+        Rectangle(hBufferDC, g_cropRect.left, g_cropRect.top,
             g_cropRect.right, g_cropRect.bottom);
-        SelectObject(hdc, hOldPen);
+        SelectObject(hBufferDC, hOldPen);
         DeleteObject(hCropPen);
     }
 
-    SelectObject(hdc, hOldBrush);
+    SelectObject(hBufferDC, hOldBrush);
 
     // Help text
-    SetBkMode(hdc, TRANSPARENT);
-    SetTextColor(hdc, RGB(255, 255, 255));
+    SetBkMode(hBufferDC, TRANSPARENT);
+    SetTextColor(hBufferDC, RGB(255, 255, 255));
 
     const WCHAR* helpText =
         L"RMB: Draw  |  Ctrl+RMB: Rect  |  LMB: Save  |  Ctrl+LMB: Crop  |  "
-        L"Ctrl+Wheel: Size  |  Shift+Wheel: Color  |  Esc: Cancel";
+        L"Ctrl+Z/Y: Undo/Redo  |  Ctrl+Wheel: Size  |  Shift+Wheel: Color  |  Esc: Cancel";
 
     RECT rcText = { 0, 10, g_screenW, 40 };
-    DrawTextW(hdc, helpText, -1, &rcText, DT_CENTER | DT_SINGLELINE);
+    DrawTextW(hBufferDC, helpText, -1, &rcText, DT_CENTER | DT_SINGLELINE);
 
     // --- Cursor color/thickness indicator ---
     {
@@ -957,11 +985,11 @@ void PaintOverlay(HWND hWnd, HDC hdc)
         int radius = max(g_penThickness / 2, 2);
         HBRUSH hFillBrush = CreateSolidBrush(curColor);
         HPEN hOutlinePen = CreatePen(PS_SOLID, 1, RGB(255, 255, 255));
-        HPEN hPrevPen = (HPEN)SelectObject(hdc, hOutlinePen);
-        HBRUSH hPrevBrush = (HBRUSH)SelectObject(hdc, hFillBrush);
-        Ellipse(hdc, cx - radius, cy - radius, cx + radius, cy + radius);
-        SelectObject(hdc, hPrevBrush);
-        SelectObject(hdc, hPrevPen);
+        HPEN hPrevPen = (HPEN)SelectObject(hBufferDC, hOutlinePen);
+        HBRUSH hPrevBrush = (HBRUSH)SelectObject(hBufferDC, hFillBrush);
+        Ellipse(hBufferDC, cx - radius, cy - radius, cx + radius, cy + radius);
+        SelectObject(hBufferDC, hPrevBrush);
+        SelectObject(hBufferDC, hPrevPen);
         DeleteObject(hFillBrush);
         DeleteObject(hOutlinePen);
 
@@ -970,13 +998,20 @@ void PaintOverlay(HWND hWnd, HDC hdc)
         StringCchPrintfW(label, 64, L"%s  [%d]", g_colorNames[g_currentColorIndex], g_penThickness);
         HFONT hLabelFont = CreateFontW(14, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
             DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
-        HFONT hPrevFont = (HFONT)SelectObject(hdc, hLabelFont);
-        SetTextColor(hdc, curColor);
+        HFONT hPrevFont = (HFONT)SelectObject(hBufferDC, hLabelFont);
+        SetTextColor(hBufferDC, curColor);
         RECT rcLabel = { cx + radius + 6, cy - 8, cx + radius + 160, cy + 12 };
-        DrawTextW(hdc, label, -1, &rcLabel, DT_LEFT | DT_SINGLELINE | DT_NOCLIP);
-        SelectObject(hdc, hPrevFont);
+        DrawTextW(hBufferDC, label, -1, &rcLabel, DT_LEFT | DT_SINGLELINE | DT_NOCLIP);
+        SelectObject(hBufferDC, hPrevFont);
         DeleteObject(hLabelFont);
     }
+
+    // --- Single blit from buffer to screen ---
+    BitBlt(hdc, 0, 0, g_screenW, g_screenH, hBufferDC, 0, 0, SRCCOPY);
+
+    SelectObject(hBufferDC, hBufferOld);
+    DeleteObject(hBufferBmp);
+    DeleteDC(hBufferDC);
 }
 
 // ============================================================================
@@ -1208,6 +1243,7 @@ LRESULT CALLBACK OverlayWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
         {
             g_isDrawingFreehand = true;
             g_lastFreehandPt = pt;
+            g_freehandStrokeStart = g_lines.size();
         }
     }
     break;
@@ -1250,10 +1286,31 @@ LRESULT CALLBACK OverlayWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
             g_rects.push_back(dr);
             g_isDrawingRect = false;
             g_currentRect = {};
+
+            UndoEntry entry = {};
+            entry.type = ACTION_RECT;
+            entry.startIndex = g_rects.size() - 1;
+            entry.count = 1;
+            g_undoHistory.push_back(entry);
+            g_redoHistory.clear();
+
             InvalidateRect(hWnd, nullptr, FALSE);
         }
 
-        g_isDrawingFreehand = false;
+        if (g_isDrawingFreehand)
+        {
+            size_t strokeCount = g_lines.size() - g_freehandStrokeStart;
+            if (strokeCount > 0)
+            {
+                UndoEntry entry = {};
+                entry.type = ACTION_FREEHAND;
+                entry.startIndex = g_freehandStrokeStart;
+                entry.count = strokeCount;
+                g_undoHistory.push_back(entry);
+                g_redoHistory.clear();
+            }
+            g_isDrawingFreehand = false;
+        }
     }
     break;
 
@@ -1331,6 +1388,63 @@ LRESULT CALLBACK OverlayWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
         if (wParam == VK_ESCAPE)
         {
             CloseOverlay();
+        }
+        else if (wParam == 'Z' && (GetKeyState(VK_CONTROL) & 0x8000))
+        {
+            // Ctrl+Z: Undo
+            if (!g_undoHistory.empty())
+            {
+                UndoEntry last = g_undoHistory.back();
+                g_undoHistory.pop_back();
+
+                RedoEntry redo = {};
+                redo.undoInfo = last;
+
+                if (last.type == ACTION_FREEHAND)
+                {
+                    if (last.startIndex < g_lines.size())
+                    {
+                        redo.lines.assign(g_lines.begin() + last.startIndex, g_lines.end());
+                        g_lines.erase(g_lines.begin() + last.startIndex, g_lines.end());
+                    }
+                }
+                else if (last.type == ACTION_RECT)
+                {
+                    if (last.startIndex < g_rects.size())
+                    {
+                        redo.rects.assign(g_rects.begin() + last.startIndex, g_rects.end());
+                        g_rects.erase(g_rects.begin() + last.startIndex, g_rects.end());
+                    }
+                }
+
+                g_redoHistory.push_back(std::move(redo));
+                InvalidateRect(hWnd, nullptr, FALSE);
+            }
+        }
+        else if (wParam == 'Y' && (GetKeyState(VK_CONTROL) & 0x8000))
+        {
+            // Ctrl+Y: Redo
+            if (!g_redoHistory.empty())
+            {
+                RedoEntry redo = std::move(g_redoHistory.back());
+                g_redoHistory.pop_back();
+
+                if (redo.undoInfo.type == ACTION_FREEHAND)
+                {
+                    redo.undoInfo.startIndex = g_lines.size();
+                    redo.undoInfo.count = redo.lines.size();
+                    g_lines.insert(g_lines.end(), redo.lines.begin(), redo.lines.end());
+                }
+                else if (redo.undoInfo.type == ACTION_RECT)
+                {
+                    redo.undoInfo.startIndex = g_rects.size();
+                    redo.undoInfo.count = redo.rects.size();
+                    g_rects.insert(g_rects.end(), redo.rects.begin(), redo.rects.end());
+                }
+
+                g_undoHistory.push_back(redo.undoInfo);
+                InvalidateRect(hWnd, nullptr, FALSE);
+            }
         }
         break;
 
