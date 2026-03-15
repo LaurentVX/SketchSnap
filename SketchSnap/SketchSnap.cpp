@@ -55,6 +55,7 @@
 #define IDC_CHK_MOD_CTRL        3016
 #define IDC_CHK_MOD_ALT         3017
 #define IDC_CHK_MOD_SHIFT       3018
+#define IDC_CHK_STARTUP         3019
 
 // Registry key for persisting settings
 static const WCHAR* REG_KEY = L"Software\\SketchSnap";
@@ -251,6 +252,8 @@ void                CommitTextBlock(HWND hWnd);
 void                OpenInEditor(const WCHAR* filePath);
 void                RegisterScreenshotHotkey();
 void                UnregisterScreenshotHotkey();
+bool                IsStartupEnabled();
+void                SetStartupEnabled(bool enable);
 
 // ============================================================================
 // Settings: load from registry (with defaults)
@@ -604,20 +607,27 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
         SendMessage(hChkShift, WM_SETFONT, (WPARAM)hFont, TRUE);
         CheckDlgButton(hDlg, IDC_CHK_MOD_SHIFT, (g_hotkeyModifiers & MOD_SHIFT) ? BST_CHECKED : BST_UNCHECKED);
 
+        // --- Run at startup checkbox ---
+        HWND hChkStartup = CreateWindowW(L"BUTTON", L"Run at Windows startup",
+            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+            10, 205, 160, 20, hDlg, (HMENU)(INT_PTR)IDC_CHK_STARTUP, hInst, nullptr);
+        SendMessage(hChkStartup, WM_SETFONT, (WPARAM)hFont, TRUE);
+        CheckDlgButton(hDlg, IDC_CHK_STARTUP, IsStartupEnabled() ? BST_CHECKED : BST_UNCHECKED);
+
         // --- OK button ---
         HWND hOk = CreateWindowW(L"BUTTON", L"OK",
             WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
-            240, 205, 80, 26, hDlg, (HMENU)(INT_PTR)IDC_BTN_OK, hInst, nullptr);
+            240, 235, 80, 26, hDlg, (HMENU)(INT_PTR)IDC_BTN_OK, hInst, nullptr);
         SendMessage(hOk, WM_SETFONT, (WPARAM)hFont, TRUE);
 
         // --- Cancel button ---
         HWND hCancel = CreateWindowW(L"BUTTON", L"Cancel",
             WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-            324, 205, 80, 26, hDlg, (HMENU)(INT_PTR)IDC_BTN_CANCEL, hInst, nullptr);
+            324, 235, 80, 26, hDlg, (HMENU)(INT_PTR)IDC_BTN_CANCEL, hInst, nullptr);
         SendMessage(hCancel, WM_SETFONT, (WPARAM)hFont, TRUE);
 
         // Resize dialog to fit controls
-        SetWindowPos(hDlg, nullptr, 0, 0, 420, 280,
+        SetWindowPos(hDlg, nullptr, 0, 0, 420, 310,
             SWP_NOMOVE | SWP_NOZORDER);
 
         return (INT_PTR)TRUE;
@@ -737,6 +747,9 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
                 RegisterScreenshotHotkey();
             }
 
+            // Apply startup setting
+            SetStartupEnabled(IsDlgButtonChecked(hDlg, IDC_CHK_STARTUP) == BST_CHECKED);
+
             // Persist and ensure folder exists
             SaveSettings();
             EnsureSaveFolderExists();
@@ -758,6 +771,47 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
     }
 
     return (INT_PTR)FALSE;
+}
+
+// ============================================================================
+// Startup registry helpers (Run key)
+// ============================================================================
+static const WCHAR* STARTUP_REG_KEY = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+static const WCHAR* STARTUP_VALUE_NAME = L"SketchSnap";
+
+bool IsStartupEnabled()
+{
+    HKEY hKey = nullptr;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, STARTUP_REG_KEY, 0, KEY_READ, &hKey) != ERROR_SUCCESS)
+        return false;
+
+    WCHAR path[MAX_PATH] = {};
+    DWORD cbPath = sizeof(path);
+    bool exists = (RegQueryValueExW(hKey, STARTUP_VALUE_NAME, nullptr, nullptr,
+        (LPBYTE)path, &cbPath) == ERROR_SUCCESS);
+    RegCloseKey(hKey);
+    return exists;
+}
+
+void SetStartupEnabled(bool enable)
+{
+    HKEY hKey = nullptr;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, STARTUP_REG_KEY, 0, KEY_WRITE, &hKey) != ERROR_SUCCESS)
+        return;
+
+    if (enable)
+    {
+        WCHAR exePath[MAX_PATH] = {};
+        GetModuleFileNameW(nullptr, exePath, MAX_PATH);
+        RegSetValueExW(hKey, STARTUP_VALUE_NAME, 0, REG_SZ,
+            (const BYTE*)exePath,
+            (DWORD)((wcslen(exePath) + 1) * sizeof(WCHAR)));
+    }
+    else
+    {
+        RegDeleteValueW(hKey, STARTUP_VALUE_NAME);
+    }
+    RegCloseKey(hKey);
 }
 
 // ============================================================================
