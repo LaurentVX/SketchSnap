@@ -51,6 +51,10 @@
 #define IDC_CHK_EDITOR          3012
 #define IDC_EDIT_EDITOR         3013
 #define IDC_BTN_EDITOR_BROWSE   3014
+#define IDC_COMBO_HOTKEY        3015
+#define IDC_CHK_MOD_CTRL        3016
+#define IDC_CHK_MOD_ALT         3017
+#define IDC_CHK_MOD_SHIFT       3018
 
 // Registry key for persisting settings
 static const WCHAR* REG_KEY = L"Software\\SketchSnap";
@@ -92,6 +96,32 @@ int g_defaultPenThickness = 3;  // default pen thickness
 // --- Image editor settings ---
 bool g_openEditorEnabled = false;
 WCHAR g_editorPath[MAX_PATH] = L"mspaint.exe";
+
+// --- Hotkey settings ---
+struct HotkeyDef { UINT vk; const WCHAR* name; };
+static const HotkeyDef g_availableKeys[] =
+{
+    { VK_SNAPSHOT,  L"Print Screen" },
+    { VK_F1,        L"F1" },
+    { VK_F2,        L"F2" },
+    { VK_F3,        L"F3" },
+    { VK_F4,        L"F4" },
+    { VK_F5,        L"F5" },
+    { VK_F6,        L"F6" },
+    { VK_F7,        L"F7" },
+    { VK_F8,        L"F8" },
+    { VK_F9,        L"F9" },
+    { VK_F10,       L"F10" },
+    { VK_F11,       L"F11" },
+    { VK_F12,       L"F12" },
+    { VK_PAUSE,     L"Pause" },
+    { VK_SCROLL,    L"Scroll Lock" },
+    { VK_INSERT,    L"Insert" },
+};
+static const int g_availableKeyCount = sizeof(g_availableKeys) / sizeof(g_availableKeys[0]);
+
+UINT g_hotkeyVk = VK_SNAPSHOT;
+UINT g_hotkeyModifiers = 0;
 
 // --- Overlay state ---
 HWND g_hOverlay = nullptr;
@@ -219,6 +249,8 @@ void                DismissToast();
 void                PlayNotificationSound();
 void                CommitTextBlock(HWND hWnd);
 void                OpenInEditor(const WCHAR* filePath);
+void                RegisterScreenshotHotkey();
+void                UnregisterScreenshotHotkey();
 
 // ============================================================================
 // Settings: load from registry (with defaults)
@@ -236,6 +268,8 @@ void LoadSettings()
     g_defaultPenThickness = 3;
     g_openEditorEnabled = false;
     StringCchCopyW(g_editorPath, MAX_PATH, L"mspaint.exe");
+    g_hotkeyVk = VK_SNAPSHOT;
+    g_hotkeyModifiers = 0;
 
     HKEY hKey = nullptr;
     if (RegOpenKeyExW(HKEY_CURRENT_USER, REG_KEY, 0, KEY_READ, &hKey) == ERROR_SUCCESS)
@@ -294,6 +328,22 @@ void LoadSettings()
         RegQueryValueExW(hKey, L"EditorPath", nullptr, nullptr,
             (LPBYTE)g_editorPath, &cbEditorPath);
 
+        DWORD hotkeyVk = VK_SNAPSHOT;
+        DWORD cbHkVk = sizeof(hotkeyVk);
+        if (RegQueryValueExW(hKey, L"HotkeyVk", nullptr, nullptr,
+            (LPBYTE)&hotkeyVk, &cbHkVk) == ERROR_SUCCESS)
+        {
+            g_hotkeyVk = (UINT)hotkeyVk;
+        }
+
+        DWORD hotkeyMod = 0;
+        DWORD cbHkMod = sizeof(hotkeyMod);
+        if (RegQueryValueExW(hKey, L"HotkeyModifiers", nullptr, nullptr,
+            (LPBYTE)&hotkeyMod, &cbHkMod) == ERROR_SUCCESS)
+        {
+            g_hotkeyModifiers = (UINT)hotkeyMod;
+        }
+
         RegCloseKey(hKey);
     }
 
@@ -340,6 +390,14 @@ void SaveSettings()
         RegSetValueExW(hKey, L"EditorPath", 0, REG_SZ,
             (const BYTE*)g_editorPath,
             (DWORD)((wcslen(g_editorPath) + 1) * sizeof(WCHAR)));
+
+        DWORD hotkeyVk = (DWORD)g_hotkeyVk;
+        RegSetValueExW(hKey, L"HotkeyVk", 0, REG_DWORD,
+            (const BYTE*)&hotkeyVk, sizeof(hotkeyVk));
+
+        DWORD hotkeyMod = (DWORD)g_hotkeyModifiers;
+        RegSetValueExW(hKey, L"HotkeyModifiers", 0, REG_DWORD,
+            (const BYTE*)&hotkeyMod, sizeof(hotkeyMod));
 
         RegCloseKey(hKey);
     }
@@ -505,20 +563,61 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
             374, 138, 30, 22, hDlg, (HMENU)(INT_PTR)IDC_BTN_EDITOR_BROWSE, hInst, nullptr);
         SendMessage(hEditorBrowse, WM_SETFONT, (WPARAM)hFont, TRUE);
 
+        // --- "Hotkey:" label ---
+        HWND hHkLabel = CreateWindowW(L"STATIC", L"Hotkey:",
+            WS_CHILD | WS_VISIBLE | SS_LEFT,
+            10, 173, 50, 16, hDlg, nullptr, hInst, nullptr);
+        SendMessage(hHkLabel, WM_SETFONT, (WPARAM)hFont, TRUE);
+
+        // --- Key combo box ---
+        HWND hKeyCombo = CreateWindowW(L"COMBOBOX", nullptr,
+            WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
+            60, 170, 110, 200, hDlg, (HMENU)(INT_PTR)IDC_COMBO_HOTKEY, hInst, nullptr);
+        SendMessage(hKeyCombo, WM_SETFONT, (WPARAM)hFont, TRUE);
+        {
+            int curKeySel = 0;
+            for (int i = 0; i < g_availableKeyCount; i++)
+            {
+                SendMessageW(hKeyCombo, CB_ADDSTRING, 0, (LPARAM)g_availableKeys[i].name);
+                if (g_availableKeys[i].vk == g_hotkeyVk)
+                    curKeySel = i;
+            }
+            SendMessageW(hKeyCombo, CB_SETCURSEL, (WPARAM)curKeySel, 0);
+        }
+
+        // --- Modifier checkboxes ---
+        HWND hChkCtrl = CreateWindowW(L"BUTTON", L"Ctrl",
+            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+            180, 173, 45, 20, hDlg, (HMENU)(INT_PTR)IDC_CHK_MOD_CTRL, hInst, nullptr);
+        SendMessage(hChkCtrl, WM_SETFONT, (WPARAM)hFont, TRUE);
+        CheckDlgButton(hDlg, IDC_CHK_MOD_CTRL, (g_hotkeyModifiers & MOD_CONTROL) ? BST_CHECKED : BST_UNCHECKED);
+
+        HWND hChkAlt = CreateWindowW(L"BUTTON", L"Alt",
+            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+            230, 173, 40, 20, hDlg, (HMENU)(INT_PTR)IDC_CHK_MOD_ALT, hInst, nullptr);
+        SendMessage(hChkAlt, WM_SETFONT, (WPARAM)hFont, TRUE);
+        CheckDlgButton(hDlg, IDC_CHK_MOD_ALT, (g_hotkeyModifiers & MOD_ALT) ? BST_CHECKED : BST_UNCHECKED);
+
+        HWND hChkShift = CreateWindowW(L"BUTTON", L"Shift",
+            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+            275, 173, 50, 20, hDlg, (HMENU)(INT_PTR)IDC_CHK_MOD_SHIFT, hInst, nullptr);
+        SendMessage(hChkShift, WM_SETFONT, (WPARAM)hFont, TRUE);
+        CheckDlgButton(hDlg, IDC_CHK_MOD_SHIFT, (g_hotkeyModifiers & MOD_SHIFT) ? BST_CHECKED : BST_UNCHECKED);
+
         // --- OK button ---
         HWND hOk = CreateWindowW(L"BUTTON", L"OK",
             WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
-            240, 172, 80, 26, hDlg, (HMENU)(INT_PTR)IDC_BTN_OK, hInst, nullptr);
+            240, 205, 80, 26, hDlg, (HMENU)(INT_PTR)IDC_BTN_OK, hInst, nullptr);
         SendMessage(hOk, WM_SETFONT, (WPARAM)hFont, TRUE);
 
         // --- Cancel button ---
         HWND hCancel = CreateWindowW(L"BUTTON", L"Cancel",
             WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-            324, 172, 80, 26, hDlg, (HMENU)(INT_PTR)IDC_BTN_CANCEL, hInst, nullptr);
+            324, 205, 80, 26, hDlg, (HMENU)(INT_PTR)IDC_BTN_CANCEL, hInst, nullptr);
         SendMessage(hCancel, WM_SETFONT, (WPARAM)hFont, TRUE);
 
         // Resize dialog to fit controls
-        SetWindowPos(hDlg, nullptr, 0, 0, 420, 248,
+        SetWindowPos(hDlg, nullptr, 0, 0, 420, 280,
             SWP_NOMOVE | SWP_NOZORDER);
 
         return (INT_PTR)TRUE;
@@ -619,6 +718,24 @@ INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM 
             // Read editor settings
             g_openEditorEnabled = IsDlgButtonChecked(hDlg, IDC_CHK_EDITOR) == BST_CHECKED;
             GetDlgItemTextW(hDlg, IDC_EDIT_EDITOR, g_editorPath, MAX_PATH);
+
+            // Read hotkey settings
+            {
+                int keySel = (int)SendDlgItemMessageW(hDlg, IDC_COMBO_HOTKEY, CB_GETCURSEL, 0, 0);
+                if (keySel >= 0 && keySel < g_availableKeyCount)
+                    g_hotkeyVk = g_availableKeys[keySel].vk;
+
+                UINT mod = 0;
+                if (IsDlgButtonChecked(hDlg, IDC_CHK_MOD_CTRL) == BST_CHECKED)
+                    mod |= MOD_CONTROL;
+                if (IsDlgButtonChecked(hDlg, IDC_CHK_MOD_ALT) == BST_CHECKED)
+                    mod |= MOD_ALT;
+                if (IsDlgButtonChecked(hDlg, IDC_CHK_MOD_SHIFT) == BST_CHECKED)
+                    mod |= MOD_SHIFT;
+                g_hotkeyModifiers = mod;
+
+                RegisterScreenshotHotkey();
+            }
 
             // Persist and ensure folder exists
             SaveSettings();
@@ -926,6 +1043,24 @@ ATOM MyRegisterClass(HINSTANCE hInstance)
 }
 
 // ============================================================================
+// Hotkey registration helpers
+// ============================================================================
+void UnregisterScreenshotHotkey()
+{
+    if (g_hWnd)
+        UnregisterHotKey(g_hWnd, ID_HOTKEY_PRINTSCR);
+}
+
+void RegisterScreenshotHotkey()
+{
+    if (g_hWnd)
+    {
+        UnregisterHotKey(g_hWnd, ID_HOTKEY_PRINTSCR);
+        RegisterHotKey(g_hWnd, ID_HOTKEY_PRINTSCR, g_hotkeyModifiers, g_hotkeyVk);
+    }
+}
+
+// ============================================================================
 // Low-level keyboard hook
 // ============================================================================
 LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam)
@@ -933,9 +1068,20 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam)
     if (nCode == HC_ACTION && wParam == WM_KEYDOWN)
     {
         KBDLLHOOKSTRUCT* pKey = (KBDLLHOOKSTRUCT*)lParam;
-        if (pKey->vkCode == VK_SNAPSHOT)
+        if (pKey->vkCode == g_hotkeyVk)
         {
-            PostMessageW(g_hWnd, WM_TRIGGER_OVERLAY, 0, 0);
+            bool ctrlRequired  = (g_hotkeyModifiers & MOD_CONTROL) != 0;
+            bool altRequired   = (g_hotkeyModifiers & MOD_ALT) != 0;
+            bool shiftRequired = (g_hotkeyModifiers & MOD_SHIFT) != 0;
+
+            bool ctrlHeld  = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
+            bool altHeld   = (GetAsyncKeyState(VK_MENU) & 0x8000) != 0;
+            bool shiftHeld = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
+
+            if (ctrlHeld == ctrlRequired && altHeld == altRequired && shiftHeld == shiftRequired)
+            {
+                PostMessageW(g_hWnd, WM_TRIGGER_OVERLAY, 0, 0);
+            }
         }
     }
     return CallNextHookEx(hKeyboardHook, nCode, wParam, lParam);
@@ -973,7 +1119,7 @@ BOOL InitInstance(HINSTANCE hInstance, int nCmdShow)
     nid.uVersion = NOTIFYICON_VERSION_4;
     Shell_NotifyIconW(NIM_SETVERSION, &nid);
 
-    RegisterHotKey(hWnd, ID_HOTKEY_PRINTSCR, 0, VK_SNAPSHOT);
+    RegisterScreenshotHotkey();
 
     if (!RegisterHotKey(hWnd, ID_HOTKEY_CTRLSHIFT, MOD_CONTROL | MOD_SHIFT, 'S'))
     {
@@ -1872,7 +2018,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
     break;
 
     case WM_DESTROY:
-        UnregisterHotKey(hWnd, ID_HOTKEY_PRINTSCR);
+        UnregisterScreenshotHotkey();
         UnregisterHotKey(hWnd, ID_HOTKEY_CTRLSHIFT);
         Shell_NotifyIconW(NIM_DELETE, &nid);
         PostQuitMessage(0);
