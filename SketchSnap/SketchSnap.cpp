@@ -158,6 +158,7 @@ static const COLORREF g_colorPalette[] =
 {
     RGB(255, 0, 0),      // Red (default)
     RGB(255, 200, 0),    // Yellow
+	RGB(0, 0, 255),      // Blue
     RGB(0, 200, 0),      // Green
     RGB(255, 128, 0),    // Orange
     RGB(160, 32, 240),   // Purple
@@ -165,7 +166,7 @@ static const COLORREF g_colorPalette[] =
 };
 static const WCHAR* g_colorNames[] =
 {
-    L"Red", L"Yellow", L"Green", L"Orange", L"Purple", L"Brown"
+    L"Red", L"Yellow", L"Blue", L"Green", L"Orange", L"Purple", L"Brown"
 };
 static const int g_colorCount = sizeof(g_colorPalette) / sizeof(g_colorPalette[0]);
 
