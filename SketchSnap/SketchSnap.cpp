@@ -1051,7 +1051,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
         // WM_HOTKEY is a thread message (hwnd == NULL).
         if (msg.message == WM_HOTKEY)
         {
-            if (msg.wParam == ID_HOTKEY_PRINTSCR || msg.wParam == ID_HOTKEY_CTRLSHIFT)
+            if (msg.wParam == ID_HOTKEY_PRINTSCR)
             {
                 ShowOverlay();
             }
@@ -1168,19 +1168,13 @@ BOOL InitInstance(HINSTANCE hInstance, int nCmdShow)
     nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
     nid.uCallbackMessage = WM_TRAYICON;
     nid.hIcon = LoadIcon(hInstance, MAKEINTRESOURCE(IDI_SketchSnap));
-    StringCchCopyW(nid.szTip, ARRAYSIZE(nid.szTip), L"SketchSnap - PrtScr or Ctrl+Shift+S");
+    StringCchCopyW(nid.szTip, ARRAYSIZE(nid.szTip), L"SketchSnap");
     Shell_NotifyIconW(NIM_ADD, &nid);
 
     nid.uVersion = NOTIFYICON_VERSION_4;
     Shell_NotifyIconW(NIM_SETVERSION, &nid);
 
     RegisterScreenshotHotkey();
-
-    if (!RegisterHotKey(hWnd, ID_HOTKEY_CTRLSHIFT, MOD_CONTROL | MOD_SHIFT, 'S'))
-    {
-        MessageBoxW(hWnd, L"Failed to register Ctrl+Shift+S hotkey.",
-            L"SketchSnap", MB_ICONWARNING);
-    }
 
     hKeyboardHook = SetWindowsHookExW(WH_KEYBOARD_LL, LowLevelKeyboardProc, hInstance, 0);
 
@@ -2074,7 +2068,6 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 
     case WM_DESTROY:
         UnregisterScreenshotHotkey();
-        UnregisterHotKey(hWnd, ID_HOTKEY_CTRLSHIFT);
         Shell_NotifyIconW(NIM_DELETE, &nid);
         PostQuitMessage(0);
         break;
