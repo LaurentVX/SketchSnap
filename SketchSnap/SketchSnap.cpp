@@ -11,6 +11,7 @@
 #include <vector>
 #include <mmsystem.h>
 #include <commdlg.h>
+#include <cmath>
 
 #pragma comment(lib, "gdiplus.lib")
 #pragma comment(lib, "winmm.lib")
@@ -145,6 +146,14 @@ struct DrawRect
     int thickness;
 };
 
+struct DrawCircle
+{
+    POINT center;
+    int radius;
+    COLORREF color;
+    int thickness;
+};
+
 struct DrawTextAnnotation
 {
     POINT pos;
@@ -180,10 +189,11 @@ POINT g_lastMousePos = {};
 
 std::vector<DrawLine> g_lines;
 std::vector<DrawRect> g_rects;
+std::vector<DrawCircle> g_circles;
 std::vector<DrawTextAnnotation> g_texts;
 
 // Undo history — tracks each drawing action in order
-enum ActionType { ACTION_FREEHAND, ACTION_RECT, ACTION_TEXT };
+enum ActionType { ACTION_FREEHAND, ACTION_RECT, ACTION_CIRCLE, ACTION_TEXT };
 struct UndoEntry
 {
     ActionType type;
@@ -199,6 +209,7 @@ struct RedoEntry
     UndoEntry undoInfo;
     std::vector<DrawLine> lines;   // stored lines (for ACTION_FREEHAND)
     std::vector<DrawRect> rects;   // stored rects (for ACTION_RECT)
+    std::vector<DrawCircle> circles; // stored circles (for ACTION_CIRCLE)
     std::vector<DrawTextAnnotation> texts; // stored texts (for ACTION_TEXT)
 };
 std::vector<RedoEntry> g_redoHistory;
@@ -210,6 +221,13 @@ POINT g_lastFreehandPt = {};
 bool g_isDrawingRect = false;
 POINT g_rectStartPt = {};
 RECT g_currentRect = {};
+
+bool g_isDrawingCircle = false;
+POINT g_circleCenter = {};
+int g_currentRadius = 0;
+
+bool g_isDrawingStraightLine = false;
+POINT g_straightLineStart = {};
 
 // Text annotation state
 bool g_isAnnotatingText = false;
@@ -1221,11 +1239,14 @@ void ShowOverlay()
     // Clear previous annotations
     g_lines.clear();
     g_rects.clear();
+    g_circles.clear();
     g_texts.clear();
     g_undoHistory.clear();
     g_redoHistory.clear();
     g_isDrawingFreehand = false;
     g_isDrawingRect = false;
+    g_isDrawingCircle = false;
+    g_isDrawingStraightLine = false;
     g_isCropping = false;
     g_isTypingText = false;
     g_textLen = 0;
@@ -1357,12 +1378,43 @@ void PaintOverlay(HWND hWnd, HDC hdc)
         DeleteObject(hPen);
     }
 
+    // Circles (each with its own color and thickness)
+    for (const auto& c : g_circles)
+    {
+        HPEN hPen = CreatePen(PS_SOLID, c.thickness, c.color);
+        HPEN hOldPen = (HPEN)SelectObject(hBufferDC, hPen);
+        Ellipse(hBufferDC, c.center.x - c.radius, c.center.y - c.radius,
+                c.center.x + c.radius, c.center.y + c.radius);
+        SelectObject(hBufferDC, hOldPen);
+        DeleteObject(hPen);
+    }
+
     if (g_isDrawingRect)
     {
         HPEN hDashPen = CreatePen(PS_DASH, g_penThickness, g_colorPalette[g_currentColorIndex]);
         HPEN hOldPen = (HPEN)SelectObject(hBufferDC, hDashPen);
         Rectangle(hBufferDC, g_currentRect.left, g_currentRect.top,
             g_currentRect.right, g_currentRect.bottom);
+        SelectObject(hBufferDC, hOldPen);
+        DeleteObject(hDashPen);
+    }
+
+    if (g_isDrawingCircle)
+    {
+        HPEN hDashPen = CreatePen(PS_DASH, g_penThickness, g_colorPalette[g_currentColorIndex]);
+        HPEN hOldPen = (HPEN)SelectObject(hBufferDC, hDashPen);
+        Ellipse(hBufferDC, g_circleCenter.x - g_currentRadius, g_circleCenter.y - g_currentRadius,
+                g_circleCenter.x + g_currentRadius, g_circleCenter.y + g_currentRadius);
+        SelectObject(hBufferDC, hOldPen);
+        DeleteObject(hDashPen);
+    }
+
+    if (g_isDrawingStraightLine)
+    {
+        HPEN hDashPen = CreatePen(PS_DASH, g_penThickness, g_colorPalette[g_currentColorIndex]);
+        HPEN hOldPen = (HPEN)SelectObject(hBufferDC, hDashPen);
+        MoveToEx(hBufferDC, g_straightLineStart.x, g_straightLineStart.y, nullptr);
+        LineTo(hBufferDC, g_lastMousePos.x, g_lastMousePos.y);
         SelectObject(hBufferDC, hOldPen);
         DeleteObject(hDashPen);
     }
@@ -1419,7 +1471,7 @@ void PaintOverlay(HWND hWnd, HDC hdc)
     SetTextColor(hBufferDC, RGB(255, 255, 255));
 
     const WCHAR* helpText =
-        L"RMB: Draw  |  Ctrl+RMB: Rect  |  Type: Text  |  LMB: Save  |  Ctrl+LMB: Crop  |  "
+        L"RMB: Draw  |  Ctrl+RMB: Rect  |  Shift+RMB: Circle  |  Alt+RMB: Line  |  Type: Text  |  LMB: Save  |  Ctrl+LMB: Crop  |  "
         L"Ctrl+Z/Y: Undo/Redo  |  Ctrl+Wheel: Size  |  Shift+Wheel: Color  |  Esc: Cancel";
 
     RECT rcText = { 0, 10, g_screenW, 40 };
@@ -1500,6 +1552,17 @@ void SaveAnnotatedScreenshot(const RECT* cropRect)
         HPEN hPen = CreatePen(PS_SOLID, r.thickness, r.color);
         HPEN hOldPen = (HPEN)SelectObject(hCompDC, hPen);
         Rectangle(hCompDC, r.rc.left, r.rc.top, r.rc.right, r.rc.bottom);
+        SelectObject(hCompDC, hOldPen);
+        DeleteObject(hPen);
+    }
+
+    // Circles
+    for (const auto& c : g_circles)
+    {
+        HPEN hPen = CreatePen(PS_SOLID, c.thickness, c.color);
+        HPEN hOldPen = (HPEN)SelectObject(hCompDC, hPen);
+        Ellipse(hCompDC, c.center.x - c.radius, c.center.y - c.radius,
+                c.center.x + c.radius, c.center.y + c.radius);
         SelectObject(hCompDC, hOldPen);
         DeleteObject(hPen);
     }
@@ -1701,12 +1764,25 @@ LRESULT CALLBACK OverlayWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
         CommitTextBlock(hWnd);
         POINT pt = { (SHORT)LOWORD(lParam), (SHORT)HIWORD(lParam) };
         bool ctrlHeld = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+        bool shiftHeld = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+        bool altHeld = (GetKeyState(VK_MENU) & 0x8000) != 0;
 
         if (ctrlHeld)
         {
             g_isDrawingRect = true;
             g_rectStartPt = pt;
             g_currentRect = { pt.x, pt.y, pt.x, pt.y };
+        }
+        else if (shiftHeld)
+        {
+            g_isDrawingCircle = true;
+            g_circleCenter = pt;
+            g_currentRadius = 0;
+        }
+        else if (altHeld)
+        {
+            g_isDrawingStraightLine = true;
+            g_straightLineStart = pt;
         }
         else
         {
@@ -1744,6 +1820,18 @@ LRESULT CALLBACK OverlayWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
             g_currentRect = NormalizeRect(g_rectStartPt, pt);
         }
 
+        if (g_isDrawingCircle && (wParam & MK_RBUTTON))
+        {
+            int dx = pt.x - g_circleCenter.x;
+            int dy = pt.y - g_circleCenter.y;
+            g_currentRadius = (int)sqrt(dx * dx + dy * dy);
+        }
+
+        if (g_isDrawingStraightLine && (wParam & MK_RBUTTON))
+        {
+            // No preview needed, just store the current endpoint
+        }
+
         if (g_isCropping && (wParam & MK_LBUTTON))
         {
             g_cropRect = NormalizeRect(g_cropStart, pt);
@@ -1774,6 +1862,46 @@ LRESULT CALLBACK OverlayWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
             g_undoHistory.push_back(entry);
             g_redoHistory.clear();
 
+            InvalidateRect(hWnd, nullptr, FALSE);
+        }
+
+        if (g_isDrawingCircle)
+        {
+            int dx = pt.x - g_circleCenter.x;
+            int dy = pt.y - g_circleCenter.y;
+            g_currentRadius = (int)sqrt(dx * dx + dy * dy);
+
+            if (g_currentRadius > 0)
+            {
+                DrawCircle dc = { g_circleCenter, g_currentRadius, g_colorPalette[g_currentColorIndex], g_penThickness };
+                g_circles.push_back(dc);
+
+                UndoEntry entry = {};
+                entry.type = ACTION_CIRCLE;
+                entry.startIndex = g_circles.size() - 1;
+                entry.count = 1;
+                g_undoHistory.push_back(entry);
+                g_redoHistory.clear();
+            }
+
+            g_isDrawingCircle = false;
+            g_currentRadius = 0;
+            InvalidateRect(hWnd, nullptr, FALSE);
+        }
+
+        if (g_isDrawingStraightLine)
+        {
+            DrawLine line = { g_straightLineStart, pt, g_colorPalette[g_currentColorIndex], g_penThickness };
+            g_lines.push_back(line);
+
+            UndoEntry entry = {};
+            entry.type = ACTION_FREEHAND;
+            entry.startIndex = g_lines.size() - 1;
+            entry.count = 1;
+            g_undoHistory.push_back(entry);
+            g_redoHistory.clear();
+
+            g_isDrawingStraightLine = false;
             InvalidateRect(hWnd, nullptr, FALSE);
         }
 
@@ -1946,6 +2074,14 @@ LRESULT CALLBACK OverlayWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
                         g_rects.erase(g_rects.begin() + last.startIndex, g_rects.end());
                     }
                 }
+                else if (last.type == ACTION_CIRCLE)
+                {
+                    if (last.startIndex < g_circles.size())
+                    {
+                        redo.circles.assign(g_circles.begin() + last.startIndex, g_circles.end());
+                        g_circles.erase(g_circles.begin() + last.startIndex, g_circles.end());
+                    }
+                }
                 else if (last.type == ACTION_TEXT)
                 {
                     if (last.startIndex < g_texts.size())
@@ -1978,6 +2114,12 @@ LRESULT CALLBACK OverlayWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
                     redo.undoInfo.startIndex = g_rects.size();
                     redo.undoInfo.count = redo.rects.size();
                     g_rects.insert(g_rects.end(), redo.rects.begin(), redo.rects.end());
+                }
+                else if (redo.undoInfo.type == ACTION_CIRCLE)
+                {
+                    redo.undoInfo.startIndex = g_circles.size();
+                    redo.undoInfo.count = redo.circles.size();
+                    g_circles.insert(g_circles.end(), redo.circles.begin(), redo.circles.end());
                 }
                 else if (redo.undoInfo.type == ACTION_TEXT)
                 {
