@@ -165,17 +165,31 @@ struct DrawTextAnnotation
 // Annotation color palette
 static const COLORREF g_colorPalette[] =
 {
-    RGB(255, 0, 0),      // Red (default)
-    RGB(255, 200, 0),    // Yellow
+	// Primary (3)
+	RGB(255, 0, 0),      // Red
+	RGB(255, 255, 0),    // Yellow
 	RGB(0, 0, 255),      // Blue
-    RGB(0, 200, 0),      // Green
-    RGB(255, 128, 0),    // Orange
-    RGB(160, 32, 240),   // Purple
-    RGB(139, 69, 19),    // Brown
+
+	// Secondary (3)
+	RGB(0, 200, 0),      // Green
+	RGB(255, 165, 0),    // Orange
+	RGB(160, 32, 240),   // Purple
+
+	// Tertiary (3)
+	RGB(255, 69, 0),     // Red-Orange
+	RGB(173, 255, 47),   // Yellow-Green
+	RGB(138, 43, 226),   // Blue-Purple
 };
 static const WCHAR* g_colorNames[] =
 {
-    L"Red", L"Yellow", L"Blue", L"Green", L"Orange", L"Purple", L"Brown"
+    // Primary (3)
+
+	L"Red", L"Yellow", L"Blue",
+	// Secondary (3)
+
+    L"Green", L"Orange", L"Purple", 
+	// Tertiary (3)
+	L"Red-Orange", L"Yellow-Green", L"Blue-Purple"
 };
 static const int g_colorCount = sizeof(g_colorPalette) / sizeof(g_colorPalette[0]);
 
